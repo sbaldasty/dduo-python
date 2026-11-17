@@ -249,7 +249,8 @@ def L2_clip(v, b):
        :return:
 
     """
-    norm = np.linalg.norm(v, ord=2)
+    from .numpy import norm as duet_norm  # numpy's own norm returns a plain number
+    norm = duet_norm(v, ord=2)
     if norm.val > b:
         return b * (v / norm)
     else:

@@ -303,21 +303,18 @@ class DuetWrapper:
         return DuetWrapper(self.val & unwrap(other), self.senv + get_senv(other), self.mode)
 
 
-    # TODO
-    def __rmul__(self, other):
-        return DuetWrapper(self.val * unwrap(other), self.senv + get_senv(other), self.mode)
-
+    # Dividing *by* a sensitive value is unbounded (c / x blows up as x
+    # approaches 0), as it already is when both operands are sensitive.
+    # Python only calls these when `other` is not a DuetWrapper.
     def __rtruediv__(self, other):
-        return DuetWrapper(unwrap(other)/self.val, self.senv + get_senv(other), self.mode)
-
-    def __itruediv__(self, other):
-        return DuetWrapper(unwrap(other)/self.val, self.senv + get_senv(other), self.mode)
+        return DuetWrapper(unwrap(other)/self.val, self.senv.scale(float('inf')), self.mode)
 
     def __rfloordiv__(self, other):
-        return DuetWrapper(unwrap(other)//self.val, self.senv + get_senv(other), self.mode)
+        return DuetWrapper(unwrap(other)//self.val, self.senv.scale(float('inf')), self.mode)
 
-    def __ifloordiv__(self, other):
-        return DuetWrapper(unwrap(other)//self.val, self.senv + get_senv(other), self.mode)
+    # No __itruediv__/__ifloordiv__: Python then evaluates `x /= c` as
+    # `x = x / c` through __truediv__. (The in-place versions used to compute
+    # c / x instead.)
 
     def __int__(self):
         return int(self.val)
