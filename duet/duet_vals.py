@@ -10,11 +10,20 @@ class DistanceMetric():
     def __init__(self, bound=float('inf')):
         self.bound = bound
 
+    # Two metrics are equal only when they are the same kind *and* bound:
+    # L1() and LInf() share the default bound but measure distance
+    # differently, and mode checks such as sens_sum's depend on telling them
+    # apart.
     def __hash__(self):
-        return hash(self.bound)
+        return hash((type(self), self.bound))
 
     def __eq__(self, other):
-        return other.bound == self.bound
+        if not isinstance(other, DistanceMetric):
+            return NotImplemented
+        return type(self) is type(other) and self.bound == other.bound
+
+    def __repr__(self):
+        return f'{type(self).__name__}({self.bound})'
 
 class L1(DistanceMetric):
     pass
@@ -70,12 +79,20 @@ def sens_inf(senv, mode, args):
 
 def sens_clip(senv, mode, args):
     lower, upper = args
-    assert mode == LInf()
-    return senv.scale(upper - lower), L1()
+    if mode == LInf():
+        # One changed row moves one element arbitrarily far; after clipping
+        # it moves at most upper - lower.
+        return senv.scale(upper - lower), L1()
+    # Clipping is 1-Lipschitz in every coordinate, so it never increases an
+    # L1 or L2 distance that is already bounded.
+    return senv, mode
 
 def sens_sum(senv, mode, args):
-    assert mode == L1()
-    return senv, mode
+    if mode == L1():
+        return senv, mode
+    # Summing elements that are not bounded in L1 (e.g. an unclipped column)
+    # has unbounded sensitivity: clip before summing.
+    return senv.scale(float('inf')), mode
 
 def sens_getitem(senv, mode, args):
     # TODO: this should probably use the args in some cases
