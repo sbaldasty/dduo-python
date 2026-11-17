@@ -5,6 +5,10 @@ from .duet_envs import *
 import pandas as pd
 import numpy as np
 from _collections_abc import dict_items
+try:
+    from pandas.api.typing import DataFrameGroupBy
+except ImportError:  # pandas < 2.1
+    from pandas.core.groupby import DataFrameGroupBy
 
 class DistanceMetric():
     def __init__(self, bound=float('inf')):
@@ -138,7 +142,7 @@ sens_effects = {
         'size': sens_id,
         'copy': sens_id,
         'shape': sens_id,
-        'sum': sens_id,
+        'sum': sens_sum,
         'astype': sens_id,
         'flatten': sens_id,
         'dot': sens_id,
@@ -149,13 +153,23 @@ sens_effects = {
         'value_counts': sens_id,
         'to_dict': sens_id,
         'clip':  sens_clip,
-        'sum':   sens_sum
+        'sum':   sens_sum,
+        # the same values in a numpy container
+        'values': sens_id,
+        'to_numpy': sens_id
     },
     pd.DataFrame: {
         'shape': sens_id, # wrong, cols should have sens 0
         'count': sens_id,
         '__getitem__': sens_getitem,
-        'values': sens_id
+        'values': sens_id,
+        'to_numpy': sens_id,
+        # partitions the rows: a changed row lands in one group
+        'groupby': sens_id
+    },
+    DataFrameGroupBy: {
+        # one count per group; a changed row moves one of them by 1
+        'size': sens_id
     },
     tuple: {
         '__getitem__': sens_getitem
@@ -191,13 +205,13 @@ class DuetWrapper:
         typ = type(self.val)
         attr = getattr(self.val, name)
 
-        try:
-            sens_effects['duet.duet_vals.@DuetWrapper'] = {'items': sens_id}
-
-            sens_mod = sens_effects[typ][name]
-        except:
-            sens_mod = sens_id
-            # raise Exception(f'No sensitivity definition for {typ}.{name}')
+        sens_mod = sens_effects.get(typ, {}).get(name)
+        if sens_mod is None:
+            # No rule says how this method moves distances (cumsum, for
+            # one, spreads a change in one row across every later row), so
+            # assume the worst. Register a rule in `sens_effects` for
+            # methods known to be safe.
+            sens_mod = sens_inf
 
         if callable(attr):
             def _missing(*args, **kwargs):

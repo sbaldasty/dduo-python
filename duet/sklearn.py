@@ -2,6 +2,10 @@ from .duet_core import *
 from .duet_envs import *
 from sklearn import datasets as ds
 from sklearn.model_selection import train_test_split as tts
+from sklearn.utils import Bunch
+
+# Selecting the feature matrix or labels from a dataset keeps its rows.
+sens_effects[Bunch] = {'data': sens_id, 'target': sens_id}
 
 dataset = ds.load_iris()
 # X_train, X_test, y_train, y_test = train_test_split(dataset.data, dataset.target, test_size=0.2)
