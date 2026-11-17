@@ -64,10 +64,17 @@ def test_counts_are_value_distances(people, count):
     assert sensitivity(result) == 1
 
 
-def test_clip_turns_rows_into_a_value_distance(people):
+def test_clip_sets_bounds_and_keeps_rows(people):
     clipped = people["age"].clip(0, 100)
-    assert clipped.mode == L1()
-    assert sensitivity(clipped) == 100
+    assert clipped.mode == Rows()
+    assert clipped.bounds == (0, 100)
+    assert sensitivity(clipped) == 1
+
+
+def test_sum_turns_bounded_rows_into_a_value_distance(people):
+    total = people["age"].clip(0, 100).sum()
+    assert total.mode == L1()
+    assert sensitivity(total) == 100
 
 
 def test_clipping_a_value_distance_keeps_it(people):

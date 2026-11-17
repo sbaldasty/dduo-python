@@ -47,11 +47,14 @@ def test_dividing_rows_by_zero_is_still_row_local(people):
     assert sensitivity(people["age"] / 0) == 1
 
 
-@pytest.fixture
-def clipped(people):
+@pytest.fixture(params=["rows", "value"])
+def clipped(people, request):
+    """Ages clipped to [0, 10]: as bounded rows, or as an L1 value distance."""
     x = people["age"].clip(0, 10)
-    assert x.mode == L1()
-    return x
+    if request.param == "rows":
+        assert x.mode == Rows() and x.bounds == (0, 10)
+        return x
+    return duet.DuetWrapper(x.val, x.senv.scale(10), L1())
 
 
 @pytest.mark.parametrize("scaled, expected", [
@@ -62,17 +65,22 @@ def clipped(people):
     (lambda x: -3 * x, 30),
     (lambda x: x * 0, 0),
 ])
-def test_value_distances_scale_by_magnitude(clipped, scaled, expected):
+def test_clipped_values_scale_by_magnitude(clipped, scaled, expected):
     assert sensitivity(scaled(clipped).sum()) == expected
 
 
-def test_dividing_a_value_distance_by_zero_is_unbounded(clipped):
-    assert math.isinf(sensitivity(clipped / 0))
+def test_dividing_clipped_values_by_zero_is_unbounded(clipped):
+    assert math.isinf(sensitivity((clipped / 0).sum()))
 
 
 def test_floor_division_of_value_distance_is_unbounded(people):
-    # values clipped to [2, 4] differ by at most 2, yet // 3 can jump by 1
-    assert math.isinf(sensitivity((people["age"].clip(2, 4) // 3).sum()))
+    x = duet.DuetWrapper(people["age"].clip(2, 4).val, duet.SensEnv({duet.DataSource("x"): 2.0}), L1())
+    assert math.isinf(sensitivity((x // 3).sum()))
+
+
+def test_floor_division_of_bounded_rows_uses_the_floored_bounds(people):
+    # [2, 4] // 3 lies in [0, 1]: one changed row moves the sum by at most 1
+    assert sensitivity((people["age"].clip(2, 4) // 3).sum()) == 1
 
 
 def test_binning_rows_before_clipping_keeps_clip_width(people):

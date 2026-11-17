@@ -47,4 +47,4 @@ def test_in_place_division_of_a_constant_by_a_sensitive_value(people):
 
 
 def test_reverse_multiplication_still_scales(people):
-    assert sensitivity(3 * people["age"].clip(0, 10)) == 30
+    assert sensitivity((3 * people["age"].clip(0, 10)).sum()) == 30

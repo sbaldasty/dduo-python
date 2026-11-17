@@ -446,7 +446,7 @@ def gauss(val,**kwargs):
         debug('Running the Gaussian mechanism')
         debug(val.senv)
 
-        sensitivity = val.senv.get_max()
+        sensitivity = release_sensitivity(val)
         debug(f'Maximum sensitivity: {sensitivity}')
 
         sigma = np.sqrt(2*np.log(1.25/dlta)) * sensitivity / eps
@@ -495,7 +495,7 @@ def renyi_gauss(val,**kwargs):
         debug('Running the Renyi Gaussian mechanism')
         debug(val.senv)
 
-        sensitivity = val.senv.get_max()
+        sensitivity = release_sensitivity(val)
         debug(f'Maximum sensitivity: {sensitivity}')
 
         sigma = np.sqrt((sensitivity**2 * al) / (2 * eps))
@@ -538,7 +538,7 @@ def renyi_gauss_vec(val,**kwargs):
         debug('Running the Renyi Gaussian mechanism')
         debug(val.senv)
 
-        sensitivity = val.senv.get_max()
+        sensitivity = release_sensitivity(val)
         debug(f'Maximum sensitivity: {sensitivity}')
 
         valp = unwrap(val)
@@ -576,7 +576,7 @@ def laplace(val, **kwargs):
     debug('Running the Laplace mechanism')
     debug(val.senv)
 
-    sensitivity = val.senv.get_max()
+    sensitivity = release_sensitivity(val)
     debug(f'Maximum sensitivity: {sensitivity}')
 
     scale = sensitivity / eps
@@ -623,7 +623,7 @@ def report_noisy_max(val, R, u, epsilon):
         raw_scores = [s.val for s in scores]
 
         # Get max sensitivity
-        sensitivities = [s.senv.get_max() for s in scores]
+        sensitivities = [release_sensitivity(s) for s in scores]
         sensitivity = max(sensitivities)
 
         # Add noise to each score

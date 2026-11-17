@@ -3,6 +3,7 @@ import string
 import random
 from .duet_vals import *
 from .duet_vals import unwrap as uw
+from .duet_vals import _b_hull, UNBOUNDED
 import itertools
 import string
 import random
@@ -57,7 +58,8 @@ def zip(x,y):
 
     """
     if isinstance(x,DuetWrapper) or isinstance(y,DuetWrapper):
-        return DuetWrapper(old_zip(x,y),get_senv(x)+get_senv(y),get_mode(x))
+        return DuetWrapper(old_zip(x,y),get_senv(x)+get_senv(y),get_mode(x),
+                           _b_hull(get_bounds(x), get_bounds(y)))
     else:
         return old_zip(x,y)
 
@@ -95,7 +97,9 @@ def list(l):
         if hasattr(l, 'senv'):
             sources |= set(l.senv.sens)
         sens = {src: float('inf') for src in sources}
-    r = DuetWrapper(old_list(l1),SensEnv(sens),mode)
+    elements = old_list(l1)
+    bounds = _b_hull(*[get_bounds(x) for x in elements]) if elements else UNBOUNDED
+    r = DuetWrapper(elements,SensEnv(sens),mode,bounds)
     return r
 
 old_dict = dict
@@ -162,6 +166,7 @@ def map(f,l):
     σs = []
     newσ = SensEnv()
     modes = []
+    result_bounds = []
     for a in unwrap(l):
         # A fresh environment per element, and no in-place edits below: an
         # `f` that returns its argument (or any value sharing its
@@ -176,6 +181,7 @@ def map(f,l):
         rest = SensEnv({k: v for k, v in x.senv.sens.items() if k != sx})
         σs.append(rest)
         modes.append(x.mode)
+        result_bounds.append(get_bounds(x))
         vss.append(unwrap(x))
         # parallel composition for "x"
         newσ += rest
@@ -184,11 +190,14 @@ def map(f,l):
     # to be discarded -- leaving sensitivity {} -- unless `f` touched
     # exactly one source besides the element, so even
     # map(lambda x: x + 1, ls) came out as depending on no data.)
+    # every result element lies within the hull of the elements' bounds,
+    # which the probes derive from public constants only
+    bounds = _b_hull(*result_bounds) if result_bounds else UNBOUNDED
     result_modes = set(old_list(modes))
     if len(result_modes) != 1:
         # Results in different metrics: no single metric bounds the list.
         sources = set(l.senv.sens) | set(newσ.sens)
-        return DuetWrapper(vss, SensEnv({src: float('inf') for src in sources}), LInf())
+        return DuetWrapper(vss, SensEnv({src: float('inf') for src in sources}), LInf(), bounds)
     mode = result_modes.pop()
     if isinstance(mode, Rows):
         # Row-local results: a changed row changes only its own result, so
@@ -204,7 +213,7 @@ def map(f,l):
         # distance) moves its result by at most xσ; other sources compose
         # sequentially across the elements.
         s = newσ + l.senv.scale(xσ)
-    r = DuetWrapper(vss,s,mode)
+    r = DuetWrapper(vss,s,mode,bounds)
     return r
 
 

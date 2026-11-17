@@ -46,8 +46,7 @@ def test_clipped_sum_is_unchanged(people):
 
 def test_clipping_twice_does_not_grow_sensitivity(people):
     twice = people["age"].clip(0, 100).clip(0, 50)
-    assert twice.mode == L1()
-    assert sensitivity(twice.sum()) == 100
+    assert sensitivity(twice.sum()) == 50
 
 
 def test_mode_switch_rejects_wrong_input_mode():

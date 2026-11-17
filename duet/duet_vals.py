@@ -133,7 +133,9 @@ NONNEGATIVE = (0.0, float('inf'))
 def _bounds_of(x):
     """Public bounds of an operand: a wrapper's own, or a public constant's."""
     if isinstance(x, DuetWrapper):
-        return x.bounds
+        if x.bounds != UNBOUNDED or _sensitive(x):
+            return x.bounds
+        x = x.val  # a wrapper around public data: its own values are public
     if isinstance(x, (bool, int, float, np.number)):
         v = float(x)
         return UNBOUNDED if math.isnan(v) else (v, v)
@@ -187,6 +189,58 @@ def _b_hull(*bs):
 def _b_intersect(a, b):
     return (max(a[0], b[0]), min(a[1], b[1]))
 
+# ── From rows to values ───────────────────────────────────────────────────
+
+def per_row_change(bounds):
+    """How far one changed row can move an element with these public bounds.
+
+    A neighbouring dataset that *replaces* a row moves the element by at
+    most hi - lo; one that *adds or removes* a row moves it by the value
+    itself, at most max(|lo|, |hi|). Taking the larger covers both, and
+    equals hi - lo whenever 0 lies within the bounds.
+    """
+    lo, hi = bounds
+    return max(hi - lo, abs(lo), abs(hi))
+
+def _elements_per_row(value):
+    """Elements in one row of `value`: 1 for scalars and flat sequences."""
+    try:
+        shape = np.shape(value)
+    except Exception:
+        return 1
+    if len(shape) < 2 or shape[0] == 0:
+        return 1
+    return int(np.prod(shape[1:]))
+
+def _reduces_rows(axis, value):
+    """Whether a reduction over `axis` combines different rows."""
+    if axis is None:
+        return True
+    try:
+        ndim = max(np.ndim(value), 1)
+    except Exception:
+        ndim = 1
+    axes = axis if isinstance(axis, tuple) else (axis,)
+    for a in axes:
+        if a == 'index' or (isinstance(a, (int, np.integer)) and a % ndim == 0):
+            return True
+    return False
+
+def rows_to_value(senv, bounds, elements_per_row=1):
+    """A row distance as an L1 value distance: each changed row moves each
+    of its elements by at most per_row_change(bounds)."""
+    return senv.scale(per_row_change(bounds) * elements_per_row)
+
+def release_sensitivity(val):
+    """The value distance a mechanism releasing `val` must calibrate to.
+
+    A row distance is converted through the value's public bounds; with no
+    bounds (nothing clipped) it is unbounded.
+    """
+    if isinstance(val.mode, Rows):
+        return rows_to_value(val.senv, val.bounds, _elements_per_row(val.val)).get_max()
+    return val.senv.get_max()
+
 # Bounds rules: like the sensitivity rules, keyed by type and method name,
 # but mapping the receiver's bounds (and the call's arguments) to the
 # result's. A method with no rule gets UNBOUNDED, which is always sound.
@@ -216,45 +270,48 @@ def bounds_sum(bounds, args, kwargs=None):
             0.0 if bounds[1] <= 0 else float('inf'))
 
 # These are the sensitivity "transformers" used in the lookup table below
-def sens_id(senv, mode, args, kwargs=None):
+def sens_id(senv, mode, args, kwargs=None, bounds=UNBOUNDED, value=None):
     return senv, mode
 
-def sens_inf(senv, mode, args, kwargs=None):
+def sens_inf(senv, mode, args, kwargs=None, bounds=UNBOUNDED, value=None):
     #print(f'called inf {senv}')
     return senv.scale(float('inf')), mode
 
 
-def sens_clip(senv, mode, args, kwargs=None):
+def sens_clip(senv, mode, args, kwargs=None, bounds=UNBOUNDED, value=None):
     # pandas' Series.clip(lower=None, upper=None, ...): positional or keyword
     kwargs = kwargs or {}
     lower = args[0] if len(args) > 0 else kwargs.get('lower')
     upper = args[1] if len(args) > 1 else kwargs.get('upper')
-    if lower is None or upper is None or _sensitive(lower) or _sensitive(upper):
-        # A one-sided clip bounds nothing on the open side, and bounds that
-        # depend on the data are not public: either way no sensitivity bound.
+    if _sensitive(lower) or _sensitive(upper):
+        # A limit that depends on the data moves every element when it moves.
         return senv.scale(float('inf')), mode
-    if isinstance(mode, Rows):
-        # One changed row moves one element arbitrarily far; after clipping
-        # it moves at most upper - lower (the widest gap, for array bounds).
-        width = np.max(np.asarray(unwrap(upper), dtype=float) - np.asarray(unwrap(lower), dtype=float))
-        return senv.scale(width), L1()
-    # Clipping is 1-Lipschitz in every coordinate, so it never increases a
-    # value distance that is already bounded.
+    # Clipping works element by element: it keeps a row distance (its
+    # effect is the bounds it sets, see bounds_clip, which a sum or a
+    # release turns into a value distance) and is 1-Lipschitz for value
+    # distances.
     return senv, mode
 
-def sens_count(senv, mode, args, kwargs=None):
+def sens_count(senv, mode, args, kwargs=None, bounds=UNBOUNDED, value=None):
     """Counts, sizes and shapes: s changed rows move each count by at most s,
     so a row distance becomes a value distance with the same number."""
     return senv, LInf()
 
-def sens_sum(senv, mode, args, kwargs=None):
+def sens_sum(senv, mode, args, kwargs=None, bounds=UNBOUNDED, value=None):
     if mode == L1():
+        return senv, mode
+    if isinstance(mode, Rows):
+        kwargs = kwargs or {}
+        axis = kwargs.get('axis', args[0] if args else None)
+        if _reduces_rows(axis, value):
+            return rows_to_value(senv, bounds, _elements_per_row(value)), L1()
+        # reducing within each row is row-local
         return senv, mode
     # Summing elements that are not bounded in L1 (e.g. an unclipped column)
     # has unbounded sensitivity: clip before summing.
     return senv.scale(float('inf')), mode
 
-def sens_getitem(senv, mode, args, kwargs=None):
+def sens_getitem(senv, mode, args, kwargs=None, bounds=UNBOUNDED, value=None):
     # TODO: this should probably use the args in some cases
     return senv, mode
 
@@ -380,13 +437,15 @@ class DuetWrapper:
                 result = attr(*[unwrap(a) for a in args],
                               **{k: unwrap(v) for k, v in kwargs.items()})
 
-                new_senv, new_mode = sens_mod(new_senv, self.mode, args, kwargs)
+                new_senv, new_mode = sens_mod(new_senv, self.mode, args, kwargs,
+                                              bounds=self.bounds, value=self.val)
                 new_bounds = bounds_mod(self.bounds, args, kwargs) if bounds_mod else UNBOUNDED
 
                 return DuetWrapper(result, new_senv, new_mode, new_bounds)
             return _missing
         else:
-            new_senv, new_mode = sens_mod(self.senv, self.mode, [])
+            new_senv, new_mode = sens_mod(self.senv, self.mode, [],
+                                          bounds=self.bounds, value=self.val)
             new_bounds = bounds_mod(self.bounds, [], {}) if bounds_mod else UNBOUNDED
 
             return DuetWrapper(attr, new_senv, new_mode, new_bounds)

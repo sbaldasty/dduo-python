@@ -150,11 +150,14 @@ def sum(x,*args,**kwargs):
             # k elements summed into each output: Cauchy-Schwarz gives sqrt(k)
             k = np.size(y) / builtins.max(np.size(r), 1)
             return DuetWrapper(r, x.senv.scale(math.sqrt(k)), x.mode, bounds)
-        if isinstance(x.mode, L1):
-            return DuetWrapper(r, x.senv, x.mode, bounds)
-        # Summing elements with no value bound (unclipped rows, or an LInf
-        # value distance that every element may use in full) is
-        # unbounded; this used to return an empty sensitivity environment.
+        if isinstance(x.mode, (L1, Rows)):
+            # the same rule as Series.sum: rows become a value distance
+            # through their public bounds
+            senv, mode = sens_sum(x.senv, x.mode, args, kwargs, bounds=x.bounds, value=y)
+            return DuetWrapper(r, senv, mode, bounds)
+        # Summing an LInf value distance, which every element may use in
+        # full, is unbounded. (Non-L2 sums used to return an empty
+        # sensitivity environment.)
         return DuetWrapper(r, _unbounded(x), x.mode, bounds)
     else:
         return np.sum(x,*args,**kwargs)

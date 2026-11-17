@@ -18,7 +18,9 @@ class SensEnv:
         return self + SensEnv({var: DuetReal(sens)})
 
     def scale(self, amount):
-        newSenses = {k : amount * v for (k, v) in self.sens.items()}
+        # 0 stays 0 (independent of a source stays independent), so that
+        # scaling by inf cannot produce nan; likewise scaling by 0.
+        newSenses = {k : 0 if v == 0 or amount == 0 else amount * v for (k, v) in self.sens.items()}
         return SensEnv(newSenses)
 
     def exp(self):
