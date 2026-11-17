@@ -110,6 +110,103 @@ def floor_div_by_constant(senv, mode, c):
         return scale_by_constant(senv, mode, _inverse(c))
     return senv.scale(float('inf'))
 
+# ── Public bounds ─────────────────────────────────────────────────────────
+#
+# A DuetWrapper's `bounds` is a pair (lo, hi) such that every element of the
+# wrapped value lies in [lo, hi] -- for *every* possible dataset, not just
+# this one. Bounds therefore come only from public constants (clip limits,
+# literal operands, "a count is never negative"), never from the data, and
+# (-inf, inf) means nothing is known. They propagate by interval arithmetic.
+
+UNBOUNDED = (float('-inf'), float('inf'))
+BOOLEAN = (0.0, 1.0)
+NONNEGATIVE = (0.0, float('inf'))
+
+def _bounds_of(x):
+    """Public bounds of an operand: a wrapper's own, or a public constant's."""
+    if isinstance(x, DuetWrapper):
+        return x.bounds
+    if isinstance(x, (bool, int, float, np.number)):
+        v = float(x)
+        return UNBOUNDED if math.isnan(v) else (v, v)
+    try:
+        arr = np.asarray(x, dtype=float)
+    except (TypeError, ValueError):
+        return UNBOUNDED
+    if arr.size == 0:
+        return UNBOUNDED
+    lo, hi = np.min(arr), np.max(arr)
+    if np.isnan(lo) or np.isnan(hi):
+        return UNBOUNDED
+    return (float(lo), float(hi))
+
+def get_bounds(obj):
+    return _bounds_of(obj)
+
+def _b_neg(a):
+    return (-a[1], -a[0])
+
+def _b_add(a, b):
+    return (a[0] + b[0], a[1] + b[1])
+
+def _b_sub(a, b):
+    return _b_add(a, _b_neg(b))
+
+def _b_mul(a, b):
+    # 0 * inf is 0 here: a factor known to be exactly 0 zeroes any finite value
+    corners = [0.0 if x == 0 or y == 0 else x * y for x in a for y in b]
+    return (min(corners), max(corners))
+
+def _b_div(a, b):
+    if b[0] <= 0 <= b[1]:
+        return UNBOUNDED
+    return _b_mul(a, (1 / b[1], 1 / b[0]))
+
+def _b_floordiv(a, b):
+    q = _b_div(a, b)
+    return (float(np.floor(q[0])), float(np.floor(q[1])))
+
+def _b_abs(a):
+    if a[0] >= 0:
+        return a
+    if a[1] <= 0:
+        return _b_neg(a)
+    return (0.0, max(-a[0], a[1]))
+
+def _b_hull(*bs):
+    return (min(b[0] for b in bs), max(b[1] for b in bs))
+
+def _b_intersect(a, b):
+    return (max(a[0], b[0]), min(a[1], b[1]))
+
+# Bounds rules: like the sensitivity rules, keyed by type and method name,
+# but mapping the receiver's bounds (and the call's arguments) to the
+# result's. A method with no rule gets UNBOUNDED, which is always sound.
+
+def bounds_same(bounds, args, kwargs=None):
+    """The result's elements are among the receiver's (views, conversions)."""
+    return bounds
+
+def bounds_count(bounds, args, kwargs=None):
+    """Counts, sizes and shapes are never negative."""
+    return NONNEGATIVE
+
+def bounds_clip(bounds, args, kwargs=None):
+    kwargs = kwargs or {}
+    lower = args[0] if len(args) > 0 else kwargs.get('lower')
+    upper = args[1] if len(args) > 1 else kwargs.get('upper')
+    # A missing or data-dependent limit says nothing on its side.
+    inf = float('inf')
+    l = (-inf, -inf) if lower is None or _sensitive(lower) else _bounds_of(lower)
+    u = (inf, inf) if upper is None or _sensitive(upper) else _bounds_of(upper)
+    # each element becomes max(min(x, u_i), l_i), which is monotone in x
+    return (max(min(bounds[0], u[0]), l[0]), max(min(bounds[1], u[1]), l[1]))
+
+def bounds_sum(bounds, args, kwargs=None):
+    """Only the sign survives: n * hi would depend on the private n."""
+    return (0.0 if bounds[0] >= 0 else float('-inf'),
+            0.0 if bounds[1] <= 0 else float('inf'))
+
 # These are the sensitivity "transformers" used in the lookup table below
 def sens_id(senv, mode, args, kwargs=None):
     return senv, mode
@@ -197,20 +294,50 @@ sens_effects = {
     }
 }
 
+bounds_effects = {
+    np.ndarray: {
+        'size': bounds_count,
+        'shape': bounds_count,
+        'copy': bounds_same,
+        'flatten': bounds_same,
+        'sum': bounds_sum
+    },
+    pd.Series: {
+        'shape': bounds_count,
+        'value_counts': bounds_count,
+        'clip': bounds_clip,
+        'sum': bounds_sum,
+        'values': bounds_same,
+        'to_numpy': bounds_same
+    },
+    pd.DataFrame: {
+        'shape': bounds_count,
+        'count': bounds_count,
+        'values': bounds_same,
+        'to_numpy': bounds_same
+    },
+    DataFrameGroupBy: {
+        'size': bounds_count
+    },
+}
+
 
 class DuetWrapper:
     global sens_effects
 
 
-    def __init__(self, obj, senv, mode=LInf()):
+    def __init__(self, obj, senv, mode=LInf(), bounds=None):
+        bounds = UNBOUNDED if bounds is None else (float(bounds[0]), float(bounds[1]))
         if isinstance(obj, DuetWrapper):
             self.senv = senv + obj.senv
             self.val = obj.val
             self.mode = mode
+            self.bounds = _b_intersect(bounds, obj.bounds)
         else:
             self.senv = senv
             self.val = obj
             self.mode = mode
+            self.bounds = bounds
 
 
     def __getattr__(self, name):
@@ -224,6 +351,8 @@ class DuetWrapper:
             # assume the worst. Register a rule in `sens_effects` for
             # methods known to be safe.
             sens_mod = sens_inf
+
+        bounds_mod = bounds_effects.get(typ, {}).get(name)
 
         if callable(attr):
             def _missing(*args, **kwargs):
@@ -239,13 +368,15 @@ class DuetWrapper:
                               **{k: unwrap(v) for k, v in kwargs.items()})
 
                 new_senv, new_mode = sens_mod(new_senv, self.mode, args, kwargs)
+                new_bounds = bounds_mod(self.bounds, args, kwargs) if bounds_mod else UNBOUNDED
 
-                return DuetWrapper(result, new_senv, new_mode)
+                return DuetWrapper(result, new_senv, new_mode, new_bounds)
             return _missing
         else:
             new_senv, new_mode = sens_mod(self.senv, self.mode, [])
+            new_bounds = bounds_mod(self.bounds, [], {}) if bounds_mod else UNBOUNDED
 
-            return DuetWrapper(attr, new_senv, new_mode)
+            return DuetWrapper(attr, new_senv, new_mode, new_bounds)
 
     def __getitem__(self, key):
         name = '__getitem__'
@@ -263,70 +394,82 @@ class DuetWrapper:
         else:
             result = list(self.val).__getitem__(unwrap(key))
 
-        return DuetWrapper(result, new_senv, new_mode)
+        # a selection's elements are elements of the whole
+        return DuetWrapper(result, new_senv, new_mode, self.bounds)
 
     def __bool__(self):
         raise RuntimeError('Sensitive values cannot be used in guard position of a conditional')
 
     def __str__(self):
         sub = str(type(self.val))
-        return f'DuetWrapper({sub}, {self.senv}, {self.mode})'
+        if self.bounds == UNBOUNDED:
+            return f'DuetWrapper({sub}, {self.senv}, {self.mode})'
+        return f'DuetWrapper({sub}, {self.senv}, {self.mode}, bounds={self.bounds})'
 
     def __hash__(self):
         return hash(repr(self))
 
     def __eq__(self, other):
         new_env = self.senv.scale(float('inf'))
-        return DuetWrapper(self.val == unwrap(other), new_env, self.mode)
+        return DuetWrapper(self.val == unwrap(other), new_env, self.mode, BOOLEAN)
 
     def __abs__(self):
-        return DuetWrapper(abs(self.val), self.senv, self.mode)
+        return DuetWrapper(abs(self.val), self.senv, self.mode, _b_abs(self.bounds))
 
     def __gt__(self, other):
         new_env = self.senv.scale(float('inf'))
         newMode = self.mode
-        return DuetWrapper(self.val > unwrap(other), new_env, newMode)
+        return DuetWrapper(self.val > unwrap(other), new_env, newMode, BOOLEAN)
 
     def __lt__(self, other):
         new_env = self.senv.scale(float('inf'))
         newMode = self.mode
-        return DuetWrapper(self.val < unwrap(other), new_env, newMode)
+        return DuetWrapper(self.val < unwrap(other), new_env, newMode, BOOLEAN)
 
     def __le__(self, other):
         new_env = self.senv.scale(float('inf'))
         newMode = self.mode
-        return DuetWrapper(self.val <= unwrap(other), new_env, newMode)
+        return DuetWrapper(self.val <= unwrap(other), new_env, newMode, BOOLEAN)
 
     def __ge__(self, other):
         new_env = self.senv.scale(float('inf'))
         newMode = self.mode
-        return DuetWrapper(self.val >= unwrap(other), new_env, newMode)
+        return DuetWrapper(self.val >= unwrap(other), new_env, newMode, BOOLEAN)
 
     def __add__(self, other):
-        return DuetWrapper(self.val + unwrap(other), self.senv + get_senv(other), self.mode)
+        return DuetWrapper(self.val + unwrap(other), self.senv + get_senv(other), self.mode,
+                           _b_add(self.bounds, _bounds_of(other)))
 
     def __sub__(self, other):
-        return DuetWrapper(self.val - unwrap(other), self.senv + get_senv(other), self.mode)
+        return DuetWrapper(self.val - unwrap(other), self.senv + get_senv(other), self.mode,
+                           _b_sub(self.bounds, _bounds_of(other)))
 
 
     def __rsub__(self, other):
-        return DuetWrapper(unwrap(other)-self.val, self.senv + get_senv(other), self.mode)
+        return DuetWrapper(unwrap(other)-self.val, self.senv + get_senv(other), self.mode,
+                           _b_sub(_bounds_of(other), self.bounds))
 
     def __radd__(self, other):
-        return DuetWrapper(self.val + unwrap(other), self.senv + get_senv(other), self.mode)
+        return DuetWrapper(self.val + unwrap(other), self.senv + get_senv(other), self.mode,
+                           _b_add(_bounds_of(other), self.bounds))
 
     def __and__(self, other):
-        return DuetWrapper(self.val & unwrap(other), self.senv + get_senv(other), self.mode)
+        # & of non-negative integers (or booleans) is at most either operand
+        b = _bounds_of(other)
+        bounds = (0.0, min(self.bounds[1], b[1])) if self.bounds[0] >= 0 and b[0] >= 0 else UNBOUNDED
+        return DuetWrapper(self.val & unwrap(other), self.senv + get_senv(other), self.mode, bounds)
 
 
     # Dividing *by* a sensitive value is unbounded (c / x blows up as x
     # approaches 0), as it already is when both operands are sensitive.
     # Python only calls these when `other` is not a DuetWrapper.
     def __rtruediv__(self, other):
-        return DuetWrapper(unwrap(other)/self.val, self.senv.scale(float('inf')), self.mode)
+        return DuetWrapper(unwrap(other)/self.val, self.senv.scale(float('inf')), self.mode,
+                           _b_div(_bounds_of(other), self.bounds))
 
     def __rfloordiv__(self, other):
-        return DuetWrapper(unwrap(other)//self.val, self.senv.scale(float('inf')), self.mode)
+        return DuetWrapper(unwrap(other)//self.val, self.senv.scale(float('inf')), self.mode,
+                           _b_floordiv(_bounds_of(other), self.bounds))
 
     # No __itruediv__/__ifloordiv__: Python then evaluates `x /= c` as
     # `x = x / c` through __truediv__. (The in-place versions used to compute
@@ -341,7 +484,7 @@ class DuetWrapper:
     #     return DuetWrapper(r, self.senv, LInf())
 
     def __neg__(self):
-        return DuetWrapper(-1 * (self.val), self.senv, self.mode)
+        return DuetWrapper(-1 * (self.val), self.senv, self.mode, _b_neg(self.bounds))
 
     def __float__(self):
         return float(self.val)
@@ -355,7 +498,8 @@ class DuetWrapper:
             new_env = self.senv.scale(float('inf'))
         # print(self.val)
         # print(unwrap(other))
-        return DuetWrapper(self.val / unwrap(other), new_env, self.mode)
+        return DuetWrapper(self.val / unwrap(other), new_env, self.mode,
+                           _b_div(self.bounds, _bounds_of(other)))
 
     def __floordiv__(self,other):
         if isinstance(other, DuetWrapper):
@@ -365,7 +509,8 @@ class DuetWrapper:
         else:
             new_env = self.senv.scale(float('inf'))
 
-        return DuetWrapper(self.val // unwrap(other), new_env, self.mode)
+        return DuetWrapper(self.val // unwrap(other), new_env, self.mode,
+                           _b_floordiv(self.bounds, _bounds_of(other)))
 
 
     def __matmul__(self,other):
@@ -386,7 +531,8 @@ class DuetWrapper:
         else:
             new_env = self.senv.scale(float('inf'))
 
-        return DuetWrapper(self.val * unwrap(other), new_env, self.mode)
+        return DuetWrapper(self.val * unwrap(other), new_env, self.mode,
+                           _b_mul(self.bounds, _bounds_of(other)))
 
     def __rmul__(self, other):
         if isinstance(other, DuetWrapper):
@@ -396,4 +542,5 @@ class DuetWrapper:
         else:
             new_env = self.senv.scale(float('inf'))
 
-        return DuetWrapper(self.val * unwrap(other), new_env, self.mode)
+        return DuetWrapper(self.val * unwrap(other), new_env, self.mode,
+                           _b_mul(self.bounds, _bounds_of(other)))

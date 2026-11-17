@@ -1,6 +1,6 @@
 from .duet_core import *
 from .duet_envs import *
-from .duet_vals import _sensitive
+from .duet_vals import _sensitive, _bounds_of, _b_abs, _b_sub, _b_hull
 import pandas as pd
 import numpy as np
 import builtins
@@ -10,7 +10,7 @@ import math
 def _unbounded(x):
     return get_senv(x).scale(float('inf'))
 
-def _elementwise(x, fn, lipschitz=None):
+def _elementwise(x, fn, lipschitz=None, bounds_fn=None):
     """`fn` applied to each element of `x`.
 
     Each output element depends only on the matching input element, so a
@@ -18,14 +18,26 @@ def _elementwise(x, fn, lipschitz=None):
     distance moves by at most `lipschitz` times as much -- or without bound
     when `fn` has no Lipschitz constant -- and must not be relabelled LInf
     with its number kept, since that number is not a row count.
+
+    `bounds_fn` maps the input's public bounds to the output's; without it
+    the output's bounds are unknown.
     """
     r = fn(unwrap(x))
     senv, mode = get_senv(x), get_mode(x)
+    bounds = bounds_fn(_bounds_of(x)) if bounds_fn else None
     if isinstance(mode, LInf):
-        return DuetWrapper(r, senv, LInf())
+        return DuetWrapper(r, senv, LInf(), bounds)
     if lipschitz is None:
-        return DuetWrapper(r, _unbounded(x), LInf())
-    return DuetWrapper(r, senv.scale(lipschitz), mode)
+        return DuetWrapper(r, _unbounded(x), LInf(), bounds)
+    return DuetWrapper(r, senv.scale(lipschitz), mode, bounds)
+
+def _monotone(fn):
+    """Bounds of an increasing function: the endpoints' images."""
+    def bounds_fn(b):
+        with np.errstate(over='ignore', invalid='ignore'):
+            lo, hi = float(fn(b[0])), float(fn(b[1]))
+        return UNBOUNDED if math.isnan(lo) or math.isnan(hi) else (lo, hi)
+    return bounds_fn
 
 def _common_mode(*xs):
     """The mode shared by every sensitive operand, or None if they differ."""
@@ -46,7 +58,7 @@ def zeros(x):
     if isinstance(x, DuetWrapper):
         y = unwrap(x)
         r = np.zeros(y)
-        return DuetWrapper(r, x.senv, LInf())
+        return DuetWrapper(r, x.senv, LInf(), (0, 0))
     else:
         return np.zeros(x)
 
@@ -57,7 +69,7 @@ def zeros(x):
 
 def exp(x):
     if isinstance(x,DuetWrapper):
-        return _elementwise(x, np.exp)
+        return _elementwise(x, np.exp, bounds_fn=_monotone(np.exp))
     else:
         return np.exp(x)
 
@@ -73,10 +85,10 @@ def exp(x):
 #         return np.exp(x)
 
 def abs(x):
-    return _elementwise(x, np.abs, lipschitz=1)
+    return _elementwise(x, np.abs, lipschitz=1, bounds_fn=_b_abs)
 
 def sign(x):
-    return _elementwise(x, np.sign)
+    return _elementwise(x, np.sign, bounds_fn=_monotone(np.sign))
 
 # def sign(x):
 #     y = unwrap(x)
@@ -84,7 +96,8 @@ def sign(x):
 #     return DuetWrapper(r, get_senv(x).truncate(2), LInf())
 
 def sqrt(x):
-    return _elementwise(x, np.sqrt)
+    # sqrt of a possibly negative input yields NaN, so bounds need lo >= 0
+    return _elementwise(x, np.sqrt, bounds_fn=lambda b: _monotone(np.sqrt)(b) if b[0] >= 0 else UNBOUNDED)
 
 # def sqrt(x):
 #     y = unwrap(x)
@@ -116,11 +129,12 @@ def subtract(x,y):
         b = unwrap(y)
         r = np.subtract(a,b)
         senv = get_senv(x)+get_senv(y)
+        bounds = _b_sub(_bounds_of(x), _bounds_of(y))
         mode = _common_mode(x, y)
         if mode is None:
             # operands in different metrics: no one metric bounds the result
-            return DuetWrapper(r, senv.scale(float('inf')), LInf())
-        return DuetWrapper(r, senv, mode)
+            return DuetWrapper(r, senv.scale(float('inf')), LInf(), bounds)
+        return DuetWrapper(r, senv, mode, bounds)
     else:
         return np.subtract(x, y)
 
@@ -129,18 +143,19 @@ def sum(x,*args,**kwargs):
         y = unwrap(x)
         r = np.sum(y,*args,**kwargs)
         axis = kwargs.get('axis', args[0] if args else None)
+        bounds = bounds_sum(x.bounds, args, kwargs)
         if isinstance(x.mode, L2):
             if axis == 0:
                 # per-row L2-clipped vectors summed over the rows
-                return DuetWrapper(r, x.senv.truncate(x.mode.bound), x.mode)
+                return DuetWrapper(r, x.senv.truncate(x.mode.bound), x.mode, bounds)
             # k elements summed into each output: Cauchy-Schwarz gives sqrt(k)
             k = np.size(y) / builtins.max(np.size(r), 1)
-            return DuetWrapper(r, x.senv.scale(math.sqrt(k)), x.mode)
+            return DuetWrapper(r, x.senv.scale(math.sqrt(k)), x.mode, bounds)
         if isinstance(x.mode, L1):
-            return DuetWrapper(r, x.senv, x.mode)
+            return DuetWrapper(r, x.senv, x.mode, bounds)
         # Summing elements with no value bound (an unclipped LInf array) is
         # unbounded; this used to return an empty sensitivity environment.
-        return DuetWrapper(r, _unbounded(x), x.mode)
+        return DuetWrapper(r, _unbounded(x), x.mode, bounds)
     else:
         return np.sum(x,*args,**kwargs)
 
@@ -157,15 +172,17 @@ where = np.where
 def where(a,b,c):
     r = np.where(unwrap(a),unwrap(b),unwrap(c))
     senv = get_senv(a)+get_senv(b)+get_senv(c)
+    bounds = _b_hull(_bounds_of(b), _bounds_of(c))
     mode = _common_mode(b, c)
     if mode is None or (_sensitive(a) and not isinstance(mode, LInf)):
         # Branches in different metrics, or a sensitive condition switching
         # between value-bounded branches (a jump no value bound covers).
-        return DuetWrapper(r, senv.scale(float('inf')), LInf())
-    return DuetWrapper(r, senv, mode)
+        return DuetWrapper(r, senv.scale(float('inf')), LInf(), bounds)
+    return DuetWrapper(r, senv, mode, bounds)
 
 def where2(a):
-    return _elementwise(a, np.where)
+    # the indices of the true elements
+    return _elementwise(a, np.where, bounds_fn=lambda b: NONNEGATIVE)
 
 def where3(a):
     return np.where(a)
@@ -173,7 +190,7 @@ def where3(a):
 def norm(x, ord=None, axis=None):
     xp = unwrap(x)
     new_senv = get_senv(x).scale(float('inf'))
-    return DuetWrapper(old_norm(xp, ord, axis), new_senv, LInf())
+    return DuetWrapper(old_norm(xp, ord, axis), new_senv, LInf(), NONNEGATIVE)
 
 class _Linalg:
     """numpy.linalg with DDuo's `norm`; every other name passes through.
@@ -198,5 +215,5 @@ def array_split(arr, n):
     # wrapper for __array_struct__, which DuetWrapper forwards to the array.
     wrapped_arr = np.empty(len(split_arr), dtype=object)
     for i, x in enumerate(split_arr):
-        wrapped_arr[i] = DuetWrapper(x, sv, get_mode(arr))
+        wrapped_arr[i] = DuetWrapper(x, sv, get_mode(arr), _bounds_of(arr))
     return wrapped_arr
