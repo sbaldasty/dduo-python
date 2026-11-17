@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duet"
+version = "0.1"
+description = "DDuo: dynamic analysis for differential privacy in Python"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Chike Abuah" },
+  { name = "Alex Silence" },
+  { name = "Vanessa White" },
+  { name = "David Darais" },
+  { name = "Joe Near" },
+]
+# The core analysis (`import duet`, `duet.pandas`, `duet.numpy`) needs only
+# numpy and pandas; the integrations with other libraries are extras.
+dependencies = [
+  "numpy",
+  "pandas",
+]
+
+[project.optional-dependencies]
+sklearn = ["scikit-learn"]
+# diffprivlib 0.6.6 imports `sklearn.tree._tree.DOUBLE`, which scikit-learn
+# 1.9 removed; lift the cap once diffprivlib catches up.
+diffprivlib = ["diffprivlib", "scikit-learn<1.9"]
+tensorflow = ["tensorflow"]
+# Everything the scripts in examples/ and the notebooks import.
+examples = ["diffprivlib", "matplotlib", "scikit-learn<1.9"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["duet"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

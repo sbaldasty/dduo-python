@@ -31,6 +31,19 @@ To install DDuo locally:
 2. Navigate to the `dduo-python` directory
 3. Type `pip install .` to install DDuo using `pip`
 
+Integrations with other libraries are optional extras, e.g.
+`pip install ".[sklearn]"`, `".[diffprivlib]"`, `".[tensorflow]"`, or
+`".[examples]"` for everything the example scripts and notebooks use.
+
+## Development
+
+The project is set up for [uv](https://docs.astral.sh/uv/):
+
+```
+uv sync            # create .venv with DDuo and the dev tools
+uv run pytest      # run the test suite in tests/
+```
+
 ## Contributors
 * [Chike Abuah](https://www.uvm.edu/~cabuah/)
 * Alex Silence

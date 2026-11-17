@@ -5,3 +5,5 @@ build/
 dist/
 duet.egg-info/
 examples/archive.ics.uci.edu/
+.venv/
+.pytest_cache/
