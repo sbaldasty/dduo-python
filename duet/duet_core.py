@@ -12,6 +12,17 @@ import random
 import functools
 from collections.abc import Iterable
 
+def _noise(sampler, scale, value):
+    """Independent noise for every element of `value`; one draw for a scalar.
+
+    (gauss and renyi_gauss used to add a single draw to every element of a
+    vector, which releases the exact differences between elements.)
+    """
+    shape = np.shape(value)
+    if shape == ():
+        return sampler(loc=0, scale=scale)
+    return sampler(loc=0, scale=scale, size=shape)
+
 def _released(value, kwargs, mechanism, scale, sensitivity, bounds):
     """The mechanism's return value: `value`, or a Release with `details=True`."""
     if kwargs.get('details', False):
@@ -457,7 +468,7 @@ def gauss(val,**kwargs):
         debug(f'Maximum sensitivity: {sensitivity}')
 
         sigma = np.sqrt(2*np.log(1.25/dlta)) * sensitivity / eps
-        noise = np.random.normal(loc=0, scale=sigma)
+        noise = _noise(np.random.normal, sigma, val.val)
 
         for f in accountant.fs:
             f.pay(eps,dlta)
@@ -507,7 +518,7 @@ def renyi_gauss(val,**kwargs):
         debug(f'Maximum sensitivity: {sensitivity}')
 
         sigma = np.sqrt((sensitivity**2 * al) / (2 * eps))
-        noise = np.random.normal(loc=0, scale=sigma)
+        noise = _noise(np.random.normal, sigma, val.val)
 
         for f in accountant.fs:
             f.pay(al,eps)
@@ -553,7 +564,7 @@ def renyi_gauss_vec(val,**kwargs):
 
         valp = unwrap(val)
         sigma = np.sqrt((sensitivity**2 * al) / (2 * eps))
-        noise = np.random.normal(loc=0, scale=sigma, size=len(valp))
+        noise = _noise(np.random.normal, sigma, valp)
 
         for f in accountant.fs:
             f.pay(al,eps)
@@ -591,7 +602,7 @@ def laplace(val, **kwargs):
     debug(f'Maximum sensitivity: {sensitivity}')
 
     scale = sensitivity / eps
-    noise = np.random.laplace(loc=0, scale=scale)
+    noise = _noise(np.random.laplace, scale, val.val)
 
     for f in accountant.fs:
         f.pay(eps,0)
@@ -606,13 +617,7 @@ def laplace(val, **kwargs):
         o.add(val.senv.shrug(eps,0))
 
 
-    # check if value is a list for parallel composition
-    if hasattr(val.val, '__len__'):
-        size = len(val.val)
-        released = val.val + np.random.laplace(loc=0, scale=scale, size=size)
-    else:
-        released = val.val + noise
-    return _released(released, kwargs, 'laplace', scale, sensitivity, val.bounds)
+    return _released(val.val + noise, kwargs, 'laplace', scale, sensitivity, val.bounds)
 
 def report_noisy_max(val, R, u, epsilon):
     """
@@ -666,7 +671,7 @@ def report_noisy_max(val, R, u, epsilon):
         raise ValueError(f'Unable to analyze value {val} of type {t}')
 
 # preserves epsilon-differential privacy
-def above_threshold(queries, df, T, epsilon):
+def above_threshold(queries, df, T, epsilon, sensitivity=1):
     """
     Function which performs the sparse vector technique/above threshold
 
@@ -675,33 +680,45 @@ def above_threshold(queries, df, T, epsilon):
         df (dict): dataset
         T (float): threshold
         epsilon (float): privacy parameter
+        sensitivity (float): a public bound on every query's sensitivity,
+            fixed before seeing the data; the noise is calibrated to it.
+            Raises ValueError, before releasing anything, if a query's
+            sensitivity exceeds it.
 
     Returns:
-        int: index of the selected query
+        int: index of the first query whose noisy answer reaches the noisy
+        threshold, or -1 if none does. Either way the comparisons cost
+        epsilon, charged to every data source the queries read.
     """
+    results = [q(df) for q in queries]
+    for idx, r in enumerate(results):
+        s = release_sensitivity(r) if isinstance(r, DuetWrapper) else 0
+        if s > sensitivity:
+            raise ValueError(f'above_threshold: query {idx} has sensitivity {s}, '
+                             f'above the declared bound {sensitivity}')
 
-    T_hat = T + np.random.laplace(loc=0, scale = 2/epsilon)
-    query_result = None
+    T_hat = T + np.random.laplace(loc=0, scale = 2*sensitivity/epsilon)
+    chosen = -1
+    for idx, r in enumerate(results):
+        nu_i = np.random.laplace(loc=0, scale = 4*sensitivity/epsilon)
+        if unwrap(r) + nu_i >= T_hat:
+            chosen = idx
+            break
 
-    for idx, q in enumerate(queries):
-        query_result = q(df)
+    senv = SensEnv()
+    for r in results:
+        senv = senv + get_senv(r)
 
-        nu_i = np.random.laplace(loc=0, scale = 4/epsilon)
+    for f in accountant.fs:
+        f.pay(epsilon,0)
 
-        if query_result.val + nu_i >= T_hat:
-            for f in accountant.fs:
-                f.pay(epsilon,0)
+    for f in accountant.advfs:
+        f.pay(epsilon,0)
 
-            for f in accountant.advfs:
-                f.pay(epsilon,0)
+    for o in accountant.ods:
+        o.add(senv.shrug(epsilon,0))
 
-            for o in accountant.ods:
-                o.add(query_result.senv.shrug(epsilon,0))
+    for o in accountant.advods:
+        o.add(senv.shrug(epsilon,0))
 
-            for o in accountant.advods:
-                o.add(query_result.senv.shrug(epsilon,0))
-            # Return the idx
-            return idx
-
-    # Return the index of the last element
-    return -1
+    return chosen
