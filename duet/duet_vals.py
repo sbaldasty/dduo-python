@@ -68,6 +68,40 @@ def get_mode(obj):
         return LInf()
 
 
+def scale_by_constant(senv, mode, c):
+    """The sensitivity environment of `c * x`, where `x` has (senv, mode).
+
+    Scaling by a constant multiplies a value distance by |c|. But an
+    LInf-mode sensitivity may instead count changed rows -- read_csv starts
+    every source at 1, and sens_clip converts that count with
+    `upper - lower` -- and scaling every element by c does not change how
+    many rows differ. Until the two meanings get separate modes, LInf
+    sensitivity is never scaled *down*: 0 < |c| < 1 rounds up to 1.
+    (c == 0 makes the result constant, which is 0-sensitive either way.)
+    """
+    c = abs(c)
+    if isinstance(mode, LInf) and 0 < c < 1:
+        c = 1
+    return senv.scale(c)
+
+def _inverse(c):
+    """The factor dividing by the constant `c` scales a distance by."""
+    return float('inf') if c == 0 else 1 / c
+
+def floor_div_by_constant(senv, mode, c):
+    """The sensitivity environment of `x // c`, where `x` has (senv, mode).
+
+    Flooring is not Lipschitz: inputs that differ by a hair can land on
+    either side of a multiple of c. Under LInf's row-counting reading that
+    is harmless -- the result still differs in only the rows that changed --
+    so the rule is the same as for division. A bounded L1/L2 value distance
+    gives no multiplicative bound (every changed element may jump by 1), so
+    the result is unbounded; clip after flooring instead.
+    """
+    if isinstance(mode, LInf):
+        return scale_by_constant(senv, mode, _inverse(c))
+    return senv.scale(float('inf'))
+
 # These are the sensitivity "transformers" used in the lookup table below
 def sens_id(senv, mode, args):
     return senv, mode
@@ -289,7 +323,7 @@ class DuetWrapper:
         if isinstance(other, DuetWrapper):
             new_env = self.senv.scale(float('inf'))
         elif isinstance(other, (int, float)):
-            new_env = self.senv.scale(other)
+            new_env = scale_by_constant(self.senv, self.mode, _inverse(other))
         else:
             new_env = self.senv.scale(float('inf'))
         # print(self.val)
@@ -300,7 +334,7 @@ class DuetWrapper:
         if isinstance(other, DuetWrapper):
             new_env = self.senv.scale(float('inf'))
         elif isinstance(other, (int, float)):
-            new_env = self.senv.scale(other)
+            new_env = floor_div_by_constant(self.senv, self.mode, other)
         else:
             new_env = self.senv.scale(float('inf'))
 
@@ -311,7 +345,7 @@ class DuetWrapper:
         if isinstance(other, DuetWrapper):
             new_env = self.senv.scale(float('inf'))
         elif isinstance(other, (int, float)):
-            new_env = self.senv.scale(other)
+            new_env = scale_by_constant(self.senv, self.mode, other)
         else:
             new_env = self.senv.scale(float('inf'))
 
@@ -321,7 +355,7 @@ class DuetWrapper:
         if isinstance(other, DuetWrapper):
             new_env = self.senv.scale(float('inf'))
         elif isinstance(other, (int, float)):
-            new_env = self.senv.scale(other)
+            new_env = scale_by_constant(self.senv, self.mode, other)
         else:
             new_env = self.senv.scale(float('inf'))
 
@@ -331,7 +365,7 @@ class DuetWrapper:
         if isinstance(other, DuetWrapper):
             new_env = self.senv.scale(float('inf'))
         elif isinstance(other, (int, float)):
-            new_env = self.senv.scale(other)
+            new_env = scale_by_constant(self.senv, self.mode, other)
         else:
             new_env = self.senv.scale(float('inf'))
 

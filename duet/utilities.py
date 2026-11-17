@@ -174,7 +174,7 @@ def map(f,l):
         # parallel composition for "x"
         newσ += rest
     xσ  = max(xσs)
-    xσp = l.senv.scale(xσ)
+    xσp = scale_by_constant(l.senv, l.mode, xσ)
     # sequential composition for everything else
     s  = newσ + xσp
     # `s` is the sensitivity of the result whatever sources `f` touches.
