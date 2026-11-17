@@ -241,6 +241,112 @@ def release_sensitivity(val):
         return rows_to_value(val.senv, val.bounds, _elements_per_row(val.val)).get_max()
     return val.senv.get_max()
 
+# ── Elementwise binary operations ─────────────────────────────────────────
+
+def _shape(x):
+    try:
+        return np.shape(unwrap(x))
+    except Exception:
+        return ()
+
+_PANDAS = (pd.Series, pd.DataFrame)
+
+def _label_aligned(x, result):
+    """pandas lines operands up by index label, and labels identify
+    records: a Series combined with a Series (or a DataFrame with a
+    DataFrame) pairs each record with itself, filtered or reordered."""
+    return isinstance(result, _PANDAS) and type(unwrap(x)) is type(result)
+
+def _row_aligned(x, result):
+    """Whether element i of `result` depends only on row i of `x`.
+
+    pandas operands align by label (see _label_aligned). Otherwise
+    alignment is positional: x must have the result's number of dimensions
+    and rows, and numpy broadcasting along later axes stays within a row.
+    A scalar (or a single row) combined with a whole column is broadcast
+    *across* rows.
+    """
+    if isinstance(result, _PANDAS) and isinstance(unwrap(x), _PANDAS):
+        return _label_aligned(x, result)
+    xs, rs = _shape(x), _shape(result)
+    if len(rs) == 0:
+        return len(xs) == 0
+    return len(xs) == len(rs) and xs[0] == rs[0]
+
+def rows_combination(operands, result):
+    """(senv, Rows()) of an elementwise combination of `operands`, at least
+    one of which is a sensitive row distance.
+
+    Element i of the result depends on row i of each row-aligned Rows
+    operand, so their counts carry over -- as a per-source maximum when
+    every one pairs records by label, else as a sum. A Rows operand
+    broadcast across rows, or a value-distance operand (which moves every
+    element it is combined with), makes its sources unbounded, unless the
+    result is a single element.
+    """
+    inf = float('inf')
+    sensitive = list({id(x): x for x in operands if _sensitive(x)}.values())
+    if all(isinstance(get_mode(x), Rows) and _label_aligned(x, result) for x in sensitive):
+        envs = [get_senv(x) for x in sensitive]
+        sources = set().union(*(e.sens for e in envs))
+        return SensEnv({k: max(e.sens.get(k, 0) for e in envs) for k in sources}), Rows()
+    scalar = len(_shape(result)) == 0
+    senv = SensEnv()
+    for x in sensitive:
+        e = get_senv(x)
+        if isinstance(get_mode(x), Rows) and _row_aligned(x, result):
+            senv = senv + e
+        elif scalar:
+            senv = senv + SensEnv({k: 0 if v == 0 else 1 for k, v in e.sens.items()})
+        else:
+            senv = senv + e.scale(inf)
+    if scalar:
+        # a single element differs in at most one place
+        senv = SensEnv({k: min(v, 1) for k, v in senv.sens.items()})
+    return senv, Rows()
+
+def binary_sensitivity(a, b, kind, result):
+    """(senv, mode) of an elementwise binary operation producing `result`.
+
+    `kind` says how the operation moves value distances: 'add' (+, -:
+    1-Lipschitz in each operand), 'mul', 'div' (b is the divisor), or
+    'other' (comparisons, &, //: no Lipschitz constant).
+
+    Row distances need no such constant: if every sensitive operand is
+    Rows, element i of the result depends only on row i of each, so the
+    result differs only in rows where an operand differs -- whatever the
+    operation, products and comparisons included. An operand broadcast
+    across rows (one row feeding every element) is the exception.
+    """
+    inf = float('inf')
+    sensitive = [x for x in (a, b) if _sensitive(x)]
+    if not sensitive:
+        return get_senv(a) + get_senv(b), get_mode(a)
+
+    if any(isinstance(get_mode(x), Rows) for x in sensitive):
+        return rows_combination([a, b], result)
+
+    unbounded = (get_senv(a) + get_senv(b)).scale(inf)
+    modes = {get_mode(x) for x in sensitive}
+    if len(modes) > 1:
+        return unbounded, LInf()
+    mode = modes.pop()
+    if not isinstance(mode, LInf) and any(_shape(x) != _shape(result) for x in sensitive):
+        # an L1/L2 distance broadcast over more elements grows with them
+        return unbounded, mode
+    if kind == 'add':
+        return get_senv(a) + get_senv(b), mode
+    if len(sensitive) == 1:
+        x = sensitive[0]
+        lo, hi = _bounds_of(b if x is a else a)
+        if kind == 'mul':
+            return get_senv(x).scale(max(abs(lo), abs(hi))), mode
+        if kind == 'div' and x is a:
+            factor = inf if lo <= 0 <= hi else 1 / min(abs(lo), abs(hi))
+            return get_senv(x).scale(factor), mode
+    # products of sensitive values, division by one, comparisons, flooring
+    return unbounded, mode
+
 # Bounds rules: like the sensitivity rules, keyed by type and method name,
 # but mapping the receiver's bounds (and the call's arguments) to the
 # result's. A method with no rule gets UNBOUNDED, which is always sound.
@@ -395,6 +501,12 @@ bounds_effects = {
 class DuetWrapper:
     global sens_effects
 
+    # Tell numpy not to absorb a DuetWrapper into its own arithmetic:
+    # `ndarray * wrapper` then returns NotImplemented and Python calls
+    # DuetWrapper.__rmul__, instead of numpy probing the wrapper (whose
+    # __getattr__ forwards to the wrapped value) for __array_struct__.
+    __array_ufunc__ = None
+
 
     def __init__(self, obj, senv, mode=LInf(), bounds=None):
         bounds = UNBOUNDED if bounds is None else (float(bounds[0]), float(bounds[1]))
@@ -481,67 +593,61 @@ class DuetWrapper:
     def __hash__(self):
         return hash(repr(self))
 
+    def _binary(self, other, kind, value, bounds, reflected=False):
+        a, b = (other, self) if reflected else (self, other)
+        senv, mode = binary_sensitivity(a, b, kind, value)
+        return DuetWrapper(value, senv, mode, bounds)
+
     def __eq__(self, other):
-        new_env = self.senv.scale(float('inf'))
-        return DuetWrapper(self.val == unwrap(other), new_env, self.mode, BOOLEAN)
+        return self._binary(other, 'other', self.val == unwrap(other), BOOLEAN)
 
     def __abs__(self):
         return DuetWrapper(abs(self.val), self.senv, self.mode, _b_abs(self.bounds))
 
     def __gt__(self, other):
-        new_env = self.senv.scale(float('inf'))
-        newMode = self.mode
-        return DuetWrapper(self.val > unwrap(other), new_env, newMode, BOOLEAN)
+        return self._binary(other, 'other', self.val > unwrap(other), BOOLEAN)
 
     def __lt__(self, other):
-        new_env = self.senv.scale(float('inf'))
-        newMode = self.mode
-        return DuetWrapper(self.val < unwrap(other), new_env, newMode, BOOLEAN)
+        return self._binary(other, 'other', self.val < unwrap(other), BOOLEAN)
 
     def __le__(self, other):
-        new_env = self.senv.scale(float('inf'))
-        newMode = self.mode
-        return DuetWrapper(self.val <= unwrap(other), new_env, newMode, BOOLEAN)
+        return self._binary(other, 'other', self.val <= unwrap(other), BOOLEAN)
 
     def __ge__(self, other):
-        new_env = self.senv.scale(float('inf'))
-        newMode = self.mode
-        return DuetWrapper(self.val >= unwrap(other), new_env, newMode, BOOLEAN)
+        return self._binary(other, 'other', self.val >= unwrap(other), BOOLEAN)
 
     def __add__(self, other):
-        return DuetWrapper(self.val + unwrap(other), self.senv + get_senv(other), self.mode,
-                           _b_add(self.bounds, _bounds_of(other)))
+        return self._binary(other, 'add', self.val + unwrap(other),
+                            _b_add(self.bounds, _bounds_of(other)))
 
     def __sub__(self, other):
-        return DuetWrapper(self.val - unwrap(other), self.senv + get_senv(other), self.mode,
-                           _b_sub(self.bounds, _bounds_of(other)))
-
+        return self._binary(other, 'add', self.val - unwrap(other),
+                            _b_sub(self.bounds, _bounds_of(other)))
 
     def __rsub__(self, other):
-        return DuetWrapper(unwrap(other)-self.val, self.senv + get_senv(other), self.mode,
-                           _b_sub(_bounds_of(other), self.bounds))
+        return self._binary(other, 'add', unwrap(other) - self.val,
+                            _b_sub(_bounds_of(other), self.bounds), reflected=True)
 
     def __radd__(self, other):
-        return DuetWrapper(self.val + unwrap(other), self.senv + get_senv(other), self.mode,
-                           _b_add(_bounds_of(other), self.bounds))
+        return self._binary(other, 'add', unwrap(other) + self.val,
+                            _b_add(_bounds_of(other), self.bounds), reflected=True)
 
     def __and__(self, other):
         # & of non-negative integers (or booleans) is at most either operand
         b = _bounds_of(other)
         bounds = (0.0, min(self.bounds[1], b[1])) if self.bounds[0] >= 0 and b[0] >= 0 else UNBOUNDED
-        return DuetWrapper(self.val & unwrap(other), self.senv + get_senv(other), self.mode, bounds)
+        return self._binary(other, 'other', self.val & unwrap(other), bounds)
 
-
-    # Dividing *by* a sensitive value is unbounded (c / x blows up as x
-    # approaches 0), as it already is when both operands are sensitive.
-    # Python only calls these when `other` is not a DuetWrapper.
+    # Dividing *by* a sensitive value has no value-distance bound (c / x
+    # blows up as x approaches 0); for rows it is row-local like anything
+    # else. Python only calls these when `other` is not a DuetWrapper.
     def __rtruediv__(self, other):
-        return DuetWrapper(unwrap(other)/self.val, self.senv.scale(float('inf')), self.mode,
-                           _b_div(_bounds_of(other), self.bounds))
+        return self._binary(other, 'div', unwrap(other) / self.val,
+                            _b_div(_bounds_of(other), self.bounds), reflected=True)
 
     def __rfloordiv__(self, other):
-        return DuetWrapper(unwrap(other)//self.val, self.senv.scale(float('inf')), self.mode,
-                           _b_floordiv(_bounds_of(other), self.bounds))
+        return self._binary(other, 'other', unwrap(other) // self.val,
+                            _b_floordiv(_bounds_of(other), self.bounds), reflected=True)
 
     # No __itruediv__/__ifloordiv__: Python then evaluates `x /= c` as
     # `x = x / c` through __truediv__. (The in-place versions used to compute
@@ -561,28 +667,21 @@ class DuetWrapper:
     def __float__(self):
         return float(self.val)
 
+    # Plain numbers keep the constant rules (scale_by_constant and
+    # friends); everything else goes through binary_sensitivity.
     def __truediv__(self,other):
-        if isinstance(other, DuetWrapper):
-            new_env = self.senv.scale(float('inf'))
-        elif isinstance(other, (int, float)):
-            new_env = scale_by_constant(self.senv, self.mode, _inverse(other))
-        else:
-            new_env = self.senv.scale(float('inf'))
-        # print(self.val)
-        # print(unwrap(other))
-        return DuetWrapper(self.val / unwrap(other), new_env, self.mode,
-                           _b_div(self.bounds, _bounds_of(other)))
+        value = self.val / unwrap(other)
+        bounds = _b_div(self.bounds, _bounds_of(other))
+        if isinstance(other, (int, float)):
+            return DuetWrapper(value, scale_by_constant(self.senv, self.mode, _inverse(other)), self.mode, bounds)
+        return self._binary(other, 'div', value, bounds)
 
     def __floordiv__(self,other):
-        if isinstance(other, DuetWrapper):
-            new_env = self.senv.scale(float('inf'))
-        elif isinstance(other, (int, float)):
-            new_env = floor_div_by_constant(self.senv, self.mode, other)
-        else:
-            new_env = self.senv.scale(float('inf'))
-
-        return DuetWrapper(self.val // unwrap(other), new_env, self.mode,
-                           _b_floordiv(self.bounds, _bounds_of(other)))
+        value = self.val // unwrap(other)
+        bounds = _b_floordiv(self.bounds, _bounds_of(other))
+        if isinstance(other, (int, float)):
+            return DuetWrapper(value, floor_div_by_constant(self.senv, self.mode, other), self.mode, bounds)
+        return self._binary(other, 'other', value, bounds)
 
 
     def __matmul__(self,other):
@@ -596,23 +695,15 @@ class DuetWrapper:
         return DuetWrapper(self.val @ unwrap(other), new_env, self.mode)
 
     def __mul__(self, other):
-        if isinstance(other, DuetWrapper):
-            new_env = self.senv.scale(float('inf'))
-        elif isinstance(other, (int, float)):
-            new_env = scale_by_constant(self.senv, self.mode, other)
-        else:
-            new_env = self.senv.scale(float('inf'))
-
-        return DuetWrapper(self.val * unwrap(other), new_env, self.mode,
-                           _b_mul(self.bounds, _bounds_of(other)))
+        value = self.val * unwrap(other)
+        bounds = _b_mul(self.bounds, _bounds_of(other))
+        if isinstance(other, (int, float)):
+            return DuetWrapper(value, scale_by_constant(self.senv, self.mode, other), self.mode, bounds)
+        return self._binary(other, 'mul', value, bounds)
 
     def __rmul__(self, other):
-        if isinstance(other, DuetWrapper):
-            new_env = self.senv.scale(float('inf'))
-        elif isinstance(other, (int, float)):
-            new_env = scale_by_constant(self.senv, self.mode, other)
-        else:
-            new_env = self.senv.scale(float('inf'))
-
-        return DuetWrapper(self.val * unwrap(other), new_env, self.mode,
-                           _b_mul(self.bounds, _bounds_of(other)))
+        value = unwrap(other) * self.val
+        bounds = _b_mul(_bounds_of(other), self.bounds)
+        if isinstance(other, (int, float)):
+            return DuetWrapper(value, scale_by_constant(self.senv, self.mode, other), self.mode, bounds)
+        return self._binary(other, 'mul', value, bounds, reflected=True)

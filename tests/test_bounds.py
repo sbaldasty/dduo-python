@@ -92,8 +92,7 @@ def test_product_of_two_clipped_columns(people):
     w, x = people["hours"].clip(0, 2), people["age"].clip(0, 100)
     product = w * x
     assert product.bounds == (0, 200)
-    # finite sensitivity for such products is the next step; for now it stays
-    assert math.isinf(product.senv.get_max())
+    assert product.senv.get_max() == 1    # row-local: still one row
 
 
 def test_division_by_an_interval_containing_zero_is_unbounded(x):

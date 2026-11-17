@@ -1,6 +1,6 @@
 from .duet_core import *
 from .duet_envs import *
-from .duet_vals import _sensitive, _bounds_of, _b_abs, _b_sub, _b_hull
+from .duet_vals import _sensitive, _bounds_of, _b_abs, _b_sub, _b_hull, _row_aligned, _reduces_rows
 import pandas as pd
 import numpy as np
 import builtins
@@ -127,13 +127,8 @@ def subtract(x,y):
         a = unwrap(x)
         b = unwrap(y)
         r = np.subtract(a,b)
-        senv = get_senv(x)+get_senv(y)
-        bounds = _b_sub(_bounds_of(x), _bounds_of(y))
-        mode = _common_mode(x, y)
-        if mode is None:
-            # operands in different metrics: no one metric bounds the result
-            return DuetWrapper(r, senv.scale(float('inf')), LInf(), bounds)
-        return DuetWrapper(r, senv, mode, bounds)
+        senv, mode = binary_sensitivity(x, y, 'add', r)
+        return DuetWrapper(r, senv, mode, _b_sub(_bounds_of(x), _bounds_of(y)))
     else:
         return np.subtract(x, y)
 
@@ -176,10 +171,17 @@ def where(a,b,c):
     r = np.where(unwrap(a),unwrap(b),unwrap(c))
     senv = get_senv(a)+get_senv(b)+get_senv(c)
     bounds = _b_hull(_bounds_of(b), _bounds_of(c))
+    sensitive = [x for x in (a, b, c) if _sensitive(x)]
+    if builtins.any(isinstance(get_mode(x), Rows) for x in sensitive):
+        # a row-local selection (see rows_combination)
+        out, mode = rows_combination([a, b, c], r)
+        return DuetWrapper(r, out, mode, bounds)
     mode = _common_mode(b, c)
-    if mode is None or (_sensitive(a) and not isinstance(mode, Rows)):
-        # Branches in different metrics, or a sensitive condition switching
-        # between value-bounded branches (a jump no value bound covers).
+    if mode is None or _sensitive(a) \
+            or (not isinstance(mode, LInf) and builtins.any(np.shape(unwrap(x)) != np.shape(r) for x in (b, c) if _sensitive(x))):
+        # Branches in different metrics, a sensitive condition switching
+        # between value-bounded branches (a jump no value bound covers),
+        # or an L1/L2 branch broadcast.
         return DuetWrapper(r, senv.scale(float('inf')), LInf(), bounds)
     return DuetWrapper(r, senv, mode, bounds)
 
@@ -192,8 +194,12 @@ def where3(a):
 
 def norm(x, ord=None, axis=None):
     xp = unwrap(x)
+    r = old_norm(xp, ord, axis)
+    if isinstance(get_mode(x), Rows) and axis is not None and not _reduces_rows(axis, xp):
+        # one norm per row, from that row alone: row-local
+        return DuetWrapper(r, get_senv(x), Rows(), NONNEGATIVE)
     new_senv = get_senv(x).scale(float('inf'))
-    return DuetWrapper(old_norm(xp, ord, axis), new_senv, LInf(), NONNEGATIVE)
+    return DuetWrapper(r, new_senv, LInf(), NONNEGATIVE)
 
 class _Linalg:
     """numpy.linalg with DDuo's `norm`; every other name passes through.

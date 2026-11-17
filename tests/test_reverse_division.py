@@ -9,6 +9,8 @@ import math
 import pandas
 import pytest
 
+import duet
+
 from conftest import sensitivity
 
 
@@ -16,10 +18,20 @@ from conftest import sensitivity
     lambda c, x: c / x,
     lambda c, x: c // x,
 ])
-def test_dividing_by_a_sensitive_value_is_unbounded(people, divide):
+def test_dividing_by_a_value_distance_is_unbounded(people, divide):
+    x = duet.DuetWrapper(people["age"].val, duet.SensEnv({duet.DataSource("x"): 1.0}), duet.L1())
+    assert math.isinf(sensitivity(divide(100, x)))
+
+
+@pytest.mark.parametrize("divide", [
+    lambda c, x: c / x,
+    lambda c, x: c // x,
+])
+def test_dividing_by_rows_is_row_local(people, divide):
     result = divide(100, people["age"])
-    assert math.isinf(sensitivity(result))
-    assert math.isinf(sensitivity(result.clip(0, 10).sum()))
+    assert sensitivity(result) == 1
+    assert math.isinf(sensitivity(result.sum()))           # nothing bounds 100 / age
+    assert sensitivity(result.clip(0, 10).sum()) == 10
 
 
 def test_reverse_division_computes_c_over_x(people):
@@ -43,7 +55,8 @@ def test_in_place_floor_division_divides_the_value(people):
 def test_in_place_division_of_a_constant_by_a_sensitive_value(people):
     c = 100
     c /= people["age"]
-    assert math.isinf(sensitivity(c))
+    assert sensitivity(c) == 1
+    assert math.isinf(sensitivity(c.sum()))
 
 
 def test_reverse_multiplication_still_scales(people):
