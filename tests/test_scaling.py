@@ -1,11 +1,14 @@
-"""Scaling by a constant must stay sound under DDuo's row-counting LInf mode.
+"""Scaling by a constant, under each meaning of a sensitivity.
 
-For a column read from a CSV, LInf sensitivity 1 means "one row differs",
-not "each value moves by at most 1"; multiplying every element by 0.5 does
-not change how many rows differ. Before the fix, `(v * 0.5).clip(0, 10).sum()`
-got sensitivity 5 although one changed row can move it by 10. Division by a
-constant scaled by c instead of 1/|c|, and negative constants produced
-negative sensitivities.
+A row distance (Rows, e.g. a column read from a CSV) counts changed rows:
+multiplying every element by a nonzero constant does not change how many
+rows differ. A value distance (L1/L2/LInf, e.g. after clipping) bounds how
+far the value moves, so it scales by |c|.
+
+History: before Rows existed both meanings shared LInf, and
+`(v * 0.5).clip(0, 10).sum()` got sensitivity 5 although one changed row can
+move it by 10; division scaled by c instead of 1/|c|; negative constants
+produced negative sensitivities.
 """
 
 import math
@@ -13,7 +16,7 @@ import math
 import pytest
 
 import duet
-from duet.duet_vals import L1, LInf
+from duet.duet_vals import L1, LInf, Rows
 
 from conftest import sensitivity
 
@@ -27,47 +30,44 @@ def clipped_sum(x):
     lambda v: 0.5 * v,
     lambda v: v / 2,
     lambda v: v // 2,
+    lambda v: v * 2,
+    lambda v: v * -3,
+    lambda v: v / 0.5,
 ])
-def test_shrinking_a_row_distance_value_does_not_shrink_sensitivity(people, scaled):
+def test_scaling_rows_keeps_the_row_count(people, scaled):
+    assert people["age"].mode == Rows()
     assert clipped_sum(scaled(people["age"])) == 10
 
 
-def test_growing_a_row_distance_value_is_still_conservative(people):
-    assert clipped_sum(people["age"] * 2) == 20
-
-
-def test_dividing_by_a_small_constant_grows_sensitivity(people):
-    # v / 0.5 == 2 * v; this used to scale by 0.5
-    assert sensitivity(people["age"] / 0.5) == 2
-
-
-def test_negative_constants_scale_by_magnitude(people):
-    assert sensitivity(people["age"] * -3) == 3
-    assert sensitivity((people["age"] * -1).clip(-10, 0).sum()) == 10
-
-
-def test_multiplying_by_zero_is_constant(people):
+def test_multiplying_rows_by_zero_is_constant(people):
     assert sensitivity(people["age"] * 0) == 0
 
 
-def test_dividing_by_zero_is_unbounded(people):
-    assert math.isinf(sensitivity(people["age"] / 0))
+def test_dividing_rows_by_zero_is_still_row_local(people):
+    assert sensitivity(people["age"] / 0) == 1
 
 
-def test_value_distance_modes_still_scale_down(people):
-    clipped = people["age"].clip(0, 10)
-    assert clipped.mode == L1()
-    assert sensitivity((clipped * 0.5).sum()) == 5
+@pytest.fixture
+def clipped(people):
+    x = people["age"].clip(0, 10)
+    assert x.mode == L1()
+    return x
 
 
-def test_map_does_not_shrink_row_distance_sensitivity():
-    ls = duet.DuetWrapper([1, 2, 3], duet.SensEnv({duet.DataSource("ls"): 1.0}), LInf())
-    assert sensitivity(duet.map(lambda x: x * 0.5, ls)) == 1
+@pytest.mark.parametrize("scaled, expected", [
+    (lambda x: x * 0.5, 5),
+    (lambda x: x / 2, 5),
+    (lambda x: x / 0.5, 20),
+    (lambda x: x * -3, 30),
+    (lambda x: -3 * x, 30),
+    (lambda x: x * 0, 0),
+])
+def test_value_distances_scale_by_magnitude(clipped, scaled, expected):
+    assert sensitivity(scaled(clipped).sum()) == expected
 
 
-def test_mechanism_accepts_negated_value(people):
-    with duet.EDOdometer():
-        duet.laplace((people["age"] * -1).clip(-100, 0).sum(), epsilon=1.0)
+def test_dividing_a_value_distance_by_zero_is_unbounded(clipped):
+    assert math.isinf(sensitivity(clipped / 0))
 
 
 def test_floor_division_of_value_distance_is_unbounded(people):
@@ -75,6 +75,20 @@ def test_floor_division_of_value_distance_is_unbounded(people):
     assert math.isinf(sensitivity((people["age"].clip(2, 4) // 3).sum()))
 
 
-def test_binning_before_clipping_keeps_clip_width(people):
-    # binning first (row-level), clipping after: one changed row, width 10
+def test_binning_rows_before_clipping_keeps_clip_width(people):
     assert clipped_sum(people["age"] // 10) == 10
+
+
+def test_map_over_rows_keeps_the_row_count():
+    ls = duet.DuetWrapper([1, 2, 3], duet.SensEnv({duet.DataSource("ls"): 1.0}), Rows())
+    assert sensitivity(duet.map(lambda x: x * 0.5, ls)) == 1
+
+
+def test_map_over_a_value_distance_scales():
+    ls = duet.DuetWrapper([1, 2, 3], duet.SensEnv({duet.DataSource("ls"): 1.0}), LInf())
+    assert sensitivity(duet.map(lambda x: x * 0.5, ls)) == 0.5
+
+
+def test_mechanism_accepts_negated_value(people):
+    with duet.EDOdometer():
+        duet.laplace((people["age"] * -1).clip(-100, 0).sum(), epsilon=1.0)

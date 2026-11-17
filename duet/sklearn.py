@@ -11,15 +11,16 @@ dataset = ds.load_iris()
 # X_train, X_test, y_train, y_test = train_test_split(dataset.data, dataset.target, test_size=0.2)
 
 def load_iris():
-    return DuetWrapper(dataset,SensEnv({DataSource('iris'):1}),LInf())
+    return DuetWrapper(dataset,SensEnv({DataSource('iris'):1}),Rows())
 
 
 def train_test_split(d,t,test_size=0.2):
     X_train, X_test, y_train, y_test = tts(d.val, t.val, test_size=0.2)
-    a = DuetWrapper(X_train,d.senv,LInf())
-    b = DuetWrapper(X_test,d.senv,LInf())
-    c = DuetWrapper(y_train,d.senv,LInf())
-    d = DuetWrapper(y_test,d.senv,LInf())
+    # each split is a subset of the rows
+    a = DuetWrapper(X_train,d.senv,Rows())
+    b = DuetWrapper(X_test,d.senv,Rows())
+    c = DuetWrapper(y_train,d.senv,Rows())
+    d = DuetWrapper(y_test,d.senv,Rows())
     return (a,b,c,d)
 
 

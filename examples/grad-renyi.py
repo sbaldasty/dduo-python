@@ -6,6 +6,7 @@ from duet import numpy as np
 from duet import map
 from duet import L2
 from duet import LInf
+from duet import Rows
 from duet import zip
 
 epsilon = 1.0
@@ -31,7 +32,7 @@ def gradient(theta, xi, yi):
     return - (yi*xi) / e
 
 # TODO : this should probably be in duet_core
-@duet.mode_switch(LInf,L2)
+@duet.mode_switch(Rows,L2)
 def L2_clip(v, b):
     norm = np.linalg.norm(v, ord=2)
     if norm.val > b:

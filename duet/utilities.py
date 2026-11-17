@@ -151,6 +151,12 @@ def map(f,l):
 
     """
     sx  = DataSource(random_generator())
+    # Over a row-distance list each element is one row, which a change to
+    # the data replaces arbitrarily: probe `f` with a one-row element, so
+    # clipping inside `f` works as it does on data. Over a value-distance
+    # list, probe with a unit value distance to measure f's Lipschitz
+    # constant.
+    rows = isinstance(get_mode(l), Rows)
     vss = []
     xσs = []
     σs = []
@@ -162,7 +168,7 @@ def map(f,l):
         # environment) used to have `sx` popped from the one environment all
         # elements shared, so every later element was tracked as
         # 0-sensitive in `sx`.
-        x = f(DuetWrapper(a,SensEnv({sx : 1.0}),LInf()))
+        x = f(DuetWrapper(a,SensEnv({sx : 1.0}),Rows() if rows else LInf()))
         # get the sens for "x" from each result
         s = x.senv.sens.get(sx,0)
         xσs.append(s)
@@ -174,22 +180,31 @@ def map(f,l):
         # parallel composition for "x"
         newσ += rest
     xσ  = max(xσs)
-    xσp = scale_by_constant(l.senv, l.mode, xσ)
-    # sequential composition for everything else
-    s  = newσ + xσp
-    # `s` is the sensitivity of the result whatever sources `f` touches.
-    # (This used to be discarded -- leaving sensitivity {} -- unless `f`
-    # touched exactly one source besides the element, so even
+    # The result's sensitivity covers every source `f` touches. (It used
+    # to be discarded -- leaving sensitivity {} -- unless `f` touched
+    # exactly one source besides the element, so even
     # map(lambda x: x + 1, ls) came out as depending on no data.)
     result_modes = set(old_list(modes))
-    if len(result_modes) == 1:
-        mode = result_modes.pop()
-        sens = s.sens
-    else:
+    if len(result_modes) != 1:
         # Results in different metrics: no single metric bounds the list.
-        mode = LInf()
-        sens = {src: float('inf') for src in s.sens}
-    r = DuetWrapper(vss,SensEnv(sens),mode)
+        sources = set(l.senv.sens) | set(newσ.sens)
+        return DuetWrapper(vss, SensEnv({src: float('inf') for src in sources}), LInf())
+    mode = result_modes.pop()
+    if isinstance(mode, Rows):
+        # Row-local results: a changed row changes only its own result, so
+        # the list's row count carries over (0 if `f` ignores the element);
+        # a change to another source changes every element that reads it.
+        own = l.senv.scale(1 if xσ > 0 else 0)
+        others = {}
+        for src in newσ.sens:
+            others[src] = float(len([σ for σ in σs if σ.sens.get(src, 0) > 0]))
+        s = own + SensEnv(others)
+    else:
+        # Value-distance results: each changed row (or unit of value
+        # distance) moves its result by at most xσ; other sources compose
+        # sequentially across the elements.
+        s = newσ + l.senv.scale(xσ)
+    r = DuetWrapper(vss,s,mode)
     return r
 
 
@@ -239,7 +254,7 @@ def mode_switch(m1,m2):
         return wrapper
     return mode_switch
 
-@mode_switch(LInf,L2)
+@mode_switch(Rows,L2)
 def L2_clip(v, b):
     """
        :param v:

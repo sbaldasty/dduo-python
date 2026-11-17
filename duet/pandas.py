@@ -7,7 +7,7 @@ import copy
 def read_csv(filename):
     source = DataSource(filename)
     senv = SensEnv({source: 1})
-    return DuetWrapper(pd.read_csv(filename), senv, LInf())
+    return DuetWrapper(pd.read_csv(filename), senv, Rows())
 
 DataFrame = pd.DataFrame
 
@@ -19,7 +19,7 @@ k = pd.Series.to_dict
 def to_dict(x):
     # printtype(x)
     if isinstance(x, DuetWrapper):
-        return DuetWrapper(k(x.val), x.senv, LInf())
+        return DuetWrapper(k(x.val), x.senv, x.mode)
     else:
         return DuetWrapper(k(x), SensEnv({}), LInf())
         # return k(x)

@@ -6,6 +6,7 @@ from duet import numpy as np
 from duet import map
 from duet import L2
 from duet import LInf
+from duet import Rows
 #from duet import zip
 
 epsilon = 1.0
@@ -25,7 +26,7 @@ y_test = y[training_size:]
 def gaussian_mech_vec(v, alpha, epsilon):
     return duet.renyi_gauss_vec(v, α = alpha, ε = epsilon)
 
-@duet.mode_switch(LInf,L2)
+@duet.mode_switch(Rows,L2)
 def L2_clip(v, b):
     norm = np.linalg.norm(v, ord=2)
     if norm.val > b:
@@ -33,7 +34,7 @@ def L2_clip(v, b):
     else:
         return v
 
-@duet.mode_switch(LInf,L2)
+@duet.mode_switch(Rows,L2)
 def L2_clip_array(vs, b):
     norms = np.linalg.norm(vs, ord=2, axis=1)
     ratios = vs / norms[:, None]

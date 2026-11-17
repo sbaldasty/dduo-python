@@ -14,10 +14,9 @@ def _elementwise(x, fn, lipschitz=None, bounds_fn=None):
     """`fn` applied to each element of `x`.
 
     Each output element depends only on the matching input element, so a
-    row-counting LInf sensitivity carries over unchanged. An L1/L2 value
-    distance moves by at most `lipschitz` times as much -- or without bound
-    when `fn` has no Lipschitz constant -- and must not be relabelled LInf
-    with its number kept, since that number is not a row count.
+    row distance carries over unchanged. A value distance moves by at most
+    `lipschitz` times as much -- or without bound when `fn` has no
+    Lipschitz constant.
 
     `bounds_fn` maps the input's public bounds to the output's; without it
     the output's bounds are unknown.
@@ -25,8 +24,8 @@ def _elementwise(x, fn, lipschitz=None, bounds_fn=None):
     r = fn(unwrap(x))
     senv, mode = get_senv(x), get_mode(x)
     bounds = bounds_fn(_bounds_of(x)) if bounds_fn else None
-    if isinstance(mode, LInf):
-        return DuetWrapper(r, senv, LInf(), bounds)
+    if isinstance(mode, Rows):
+        return DuetWrapper(r, senv, mode, bounds)
     if lipschitz is None:
         return DuetWrapper(r, _unbounded(x), LInf(), bounds)
     return DuetWrapper(r, senv.scale(lipschitz), mode, bounds)
@@ -52,7 +51,7 @@ def _common_mode(*xs):
 def load(filename):
     source = DataSource(filename)
     senv = SensEnv({source: 1})
-    return DuetWrapper(np.load(filename), senv, LInf())
+    return DuetWrapper(np.load(filename), senv, Rows())
 
 def zeros(x):
     if isinstance(x, DuetWrapper):
@@ -109,9 +108,9 @@ def dot(x,y):
     b = unwrap(y)
     r = np.dot(a,b)
     senv = get_senv(x)+get_senv(y)
-    if not _sensitive(y) and isinstance(get_mode(x), LInf) and np.ndim(a) == 2:
+    if not _sensitive(y) and isinstance(get_mode(x), Rows) and np.ndim(a) == 2:
         # (n x d) @ public: each output row comes from one input row
-        return DuetWrapper(r, senv, LInf())
+        return DuetWrapper(r, senv, Rows())
     if not _sensitive(x) and not _sensitive(y):
         return DuetWrapper(r, senv, LInf())
     # A product of two sensitive values, or a public weighting summed over
@@ -153,7 +152,8 @@ def sum(x,*args,**kwargs):
             return DuetWrapper(r, x.senv.scale(math.sqrt(k)), x.mode, bounds)
         if isinstance(x.mode, L1):
             return DuetWrapper(r, x.senv, x.mode, bounds)
-        # Summing elements with no value bound (an unclipped LInf array) is
+        # Summing elements with no value bound (unclipped rows, or an LInf
+        # value distance that every element may use in full) is
         # unbounded; this used to return an empty sensitivity environment.
         return DuetWrapper(r, _unbounded(x), x.mode, bounds)
     else:
@@ -174,7 +174,7 @@ def where(a,b,c):
     senv = get_senv(a)+get_senv(b)+get_senv(c)
     bounds = _b_hull(_bounds_of(b), _bounds_of(c))
     mode = _common_mode(b, c)
-    if mode is None or (_sensitive(a) and not isinstance(mode, LInf)):
+    if mode is None or (_sensitive(a) and not isinstance(mode, Rows)):
         # Branches in different metrics, or a sensitive condition switching
         # between value-bounded branches (a jump no value bound covers).
         return DuetWrapper(r, senv.scale(float('inf')), LInf(), bounds)

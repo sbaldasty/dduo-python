@@ -15,7 +15,7 @@ import pytest
 
 import duet
 import duet.numpy as dnp
-from duet.duet_vals import L1, L2, LInf
+from duet.duet_vals import L1, L2, LInf, Rows
 
 from conftest import sensitivity
 
@@ -33,8 +33,9 @@ def public(value):
 # ── sum ────────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("sum_", [dnp.sum, dnp.sum2])
-def test_sum_of_unclipped_data_is_unbounded(sum_):
-    assert math.isinf(sensitivity(sum_(wrap([1, 2, 3], LInf()))))
+@pytest.mark.parametrize("mode", [Rows(), LInf()])
+def test_sum_of_unclipped_data_is_unbounded(sum_, mode):
+    assert math.isinf(sensitivity(sum_(wrap([1, 2, 3], mode))))
 
 
 def test_sum_of_clipped_data_keeps_sensitivity():
@@ -55,20 +56,24 @@ def test_sum_of_l2_vector_scales_by_sqrt_of_count():
 # ── elementwise functions ──────────────────────────────────────────────────
 
 @pytest.mark.parametrize("fn", [dnp.exp, dnp.sign, dnp.sqrt])
-def test_non_lipschitz_function_of_clipped_data_is_unbounded(fn):
-    result = fn(wrap([1, 4, 9], L1(), sens=0.5))
+@pytest.mark.parametrize("mode", [L1(), LInf()])
+def test_non_lipschitz_function_of_a_value_distance_is_unbounded(fn, mode):
+    result = fn(wrap([1, 4, 9], mode, sens=0.5))
     assert result.mode == LInf()
     assert math.isinf(sensitivity(result))
 
 
 @pytest.mark.parametrize("fn", [dnp.exp, dnp.sign, dnp.sqrt, dnp.abs])
 def test_elementwise_function_of_rows_keeps_row_count(fn):
-    assert sensitivity(fn(wrap([1, 4, 9], LInf()))) == 1
+    result = fn(wrap([1, 4, 9], Rows()))
+    assert result.mode == Rows()
+    assert sensitivity(result) == 1
 
 
-def test_abs_is_1_lipschitz():
-    result = dnp.abs(wrap([-1, 2], L1(), sens=3))
-    assert result.mode == L1()
+@pytest.mark.parametrize("mode", [L1(), LInf()])
+def test_abs_is_1_lipschitz(mode):
+    result = dnp.abs(wrap([-1, 2], mode, sens=3))
+    assert result.mode == mode
     assert sensitivity(result) == 3
 
 
@@ -109,12 +114,18 @@ def test_where_with_sensitive_condition_on_clipped_branches_is_unbounded():
 # ── dot ────────────────────────────────────────────────────────────────────
 
 def test_dot_of_two_sensitive_values_is_unbounded():
-    assert math.isinf(sensitivity(dnp.dot(wrap([[1, 2]], LInf()), wrap([3, 4], LInf()))))
+    assert math.isinf(sensitivity(dnp.dot(wrap([[1, 2]], Rows()), wrap([3, 4], Rows()))))
 
 
 def test_dot_of_record_matrix_with_public_weights_is_row_local():
     theta = public([0.5, 0.5])
-    assert sensitivity(dnp.dot(wrap([[1, 2], [3, 4]], LInf()), theta)) == 1
+    result = dnp.dot(wrap([[1, 2], [3, 4]], Rows()), theta)
+    assert result.mode == Rows()
+    assert sensitivity(result) == 1
+
+
+def test_dot_of_a_value_distance_matrix_is_unbounded():
+    assert math.isinf(sensitivity(dnp.dot(wrap([[1, 2], [3, 4]], LInf()), public([1, 1]))))
 
 
 @pytest.mark.parametrize("dot", [
@@ -122,7 +133,7 @@ def test_dot_of_record_matrix_with_public_weights_is_row_local():
     lambda s, p: dnp.dot(p, s),   # sensitive on the right: mixes its entries
 ])
 def test_dot_summing_over_sensitive_entries_is_unbounded(dot):
-    assert math.isinf(sensitivity(dot(wrap([1, 2], LInf()), public([1, 1]))))
+    assert math.isinf(sensitivity(dot(wrap([1, 2], Rows()), public([1, 1]))))
 
 
 # ── array_split / linalg ───────────────────────────────────────────────────
@@ -142,6 +153,6 @@ def test_duet_norm_is_unbounded():
 
 
 def test_utilities_l2_clip_works_without_the_numpy_patch():
-    clipped = duet.L2_clip(wrap([3, 4], LInf()), 1.0)
+    clipped = duet.L2_clip(wrap([3, 4], Rows()), 1.0)
     assert clipped.mode == L2(1.0)
     numpy.testing.assert_allclose(clipped.val, [0.6, 0.8])

@@ -29,6 +29,19 @@ class DistanceMetric():
     def __repr__(self):
         return f'{type(self).__name__}({self.bound})'
 
+# Modes say what a DuetWrapper's sensitivity number measures.
+#
+# Rows: a *row distance*. Sensitivity s means that one change to the data
+#   source changes at most s rows (elements) of the value, each by an
+#   arbitrary amount. Data sources start here (read_csv, numpy.load, ...).
+#   Any per-row computation keeps the count; nothing about the values is
+#   bounded until bounds or clipping say so.
+# L1, L2, LInf: *value distances*. Sensitivity s bounds how far the value
+#   itself moves, measured in that norm. Mechanisms release these.
+
+class Rows(DistanceMetric):
+    pass
+
 class L1(DistanceMetric):
     pass
 
@@ -79,17 +92,13 @@ def get_mode(obj):
 def scale_by_constant(senv, mode, c):
     """The sensitivity environment of `c * x`, where `x` has (senv, mode).
 
-    Scaling by a constant multiplies a value distance by |c|. But an
-    LInf-mode sensitivity may instead count changed rows -- read_csv starts
-    every source at 1, and sens_clip converts that count with
-    `upper - lower` -- and scaling every element by c does not change how
-    many rows differ. Until the two meanings get separate modes, LInf
-    sensitivity is never scaled *down*: 0 < |c| < 1 rounds up to 1.
+    Scaling multiplies a value distance by |c|, but leaves a row distance
+    alone: scaling every element by c does not change how many rows differ.
     (c == 0 makes the result constant, which is 0-sensitive either way.)
     """
     c = abs(c)
-    if isinstance(mode, LInf) and 0 < c < 1:
-        c = 1
+    if isinstance(mode, Rows):
+        c = 0 if c == 0 else 1
     return senv.scale(c)
 
 def _inverse(c):
@@ -100,14 +109,13 @@ def floor_div_by_constant(senv, mode, c):
     """The sensitivity environment of `x // c`, where `x` has (senv, mode).
 
     Flooring is not Lipschitz: inputs that differ by a hair can land on
-    either side of a multiple of c. Under LInf's row-counting reading that
-    is harmless -- the result still differs in only the rows that changed --
-    so the rule is the same as for division. A bounded L1/L2 value distance
-    gives no multiplicative bound (every changed element may jump by 1), so
-    the result is unbounded; clip after flooring instead.
+    either side of a multiple of c. For a row distance that is harmless --
+    the result still differs in only the rows that changed. A value
+    distance gets no bound (every changed element may jump by 1), so the
+    result is unbounded; floor before clipping instead.
     """
-    if isinstance(mode, LInf):
-        return scale_by_constant(senv, mode, _inverse(c))
+    if isinstance(mode, Rows):
+        return senv
     return senv.scale(float('inf'))
 
 # ── Public bounds ─────────────────────────────────────────────────────────
@@ -225,14 +233,19 @@ def sens_clip(senv, mode, args, kwargs=None):
         # A one-sided clip bounds nothing on the open side, and bounds that
         # depend on the data are not public: either way no sensitivity bound.
         return senv.scale(float('inf')), mode
-    if mode == LInf():
+    if isinstance(mode, Rows):
         # One changed row moves one element arbitrarily far; after clipping
         # it moves at most upper - lower (the widest gap, for array bounds).
         width = np.max(np.asarray(unwrap(upper), dtype=float) - np.asarray(unwrap(lower), dtype=float))
         return senv.scale(width), L1()
-    # Clipping is 1-Lipschitz in every coordinate, so it never increases an
-    # L1 or L2 distance that is already bounded.
+    # Clipping is 1-Lipschitz in every coordinate, so it never increases a
+    # value distance that is already bounded.
     return senv, mode
+
+def sens_count(senv, mode, args, kwargs=None):
+    """Counts, sizes and shapes: s changed rows move each count by at most s,
+    so a row distance becomes a value distance with the same number."""
+    return senv, LInf()
 
 def sens_sum(senv, mode, args, kwargs=None):
     if mode == L1():
@@ -248,9 +261,9 @@ def sens_getitem(senv, mode, args, kwargs=None):
 # This is the "lookup table" for sensitivities of methods
 sens_effects = {
     np.ndarray:{
-        'size': sens_id,
+        'size': sens_count,
         'copy': sens_id,
-        'shape': sens_id,
+        'shape': sens_count,
         'sum': sens_sum,
         'astype': sens_id,
         'flatten': sens_id,
@@ -258,8 +271,8 @@ sens_effects = {
         '__getitem__': sens_getitem
     },
     pd.Series: {
-        'shape': sens_id,
-        'value_counts': sens_id,
+        'shape': sens_count,
+        'value_counts': sens_count,
         'to_dict': sens_id,
         'clip':  sens_clip,
         'sum':   sens_sum,
@@ -268,8 +281,8 @@ sens_effects = {
         'to_numpy': sens_id
     },
     pd.DataFrame: {
-        'shape': sens_id, # wrong, cols should have sens 0
-        'count': sens_id,
+        'shape': sens_count, # conservative: the column count is public
+        'count': sens_count,
         '__getitem__': sens_getitem,
         'values': sens_id,
         'to_numpy': sens_id,
@@ -278,7 +291,7 @@ sens_effects = {
     },
     DataFrameGroupBy: {
         # one count per group; a changed row moves one of them by 1
-        'size': sens_id
+        'size': sens_count
     },
     tuple: {
         '__getitem__': sens_getitem
