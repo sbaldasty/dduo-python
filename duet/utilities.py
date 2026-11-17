@@ -201,13 +201,13 @@ def map(f,l):
     mode = result_modes.pop()
     if isinstance(mode, Rows):
         # Row-local results: a changed row changes only its own result, so
-        # the list's row count carries over (0 if `f` ignores the element);
-        # a change to another source changes every element that reads it.
+        # the list's row count carries over (0 if `f` ignores the element).
+        # A change to another source changes every element that reads it,
+        # and how many elements there are is private, so that count is
+        # unbounded. (Counting them would put the data-dependent length
+        # into the sensitivity, and so into the noise scale.)
         own = l.senv.scale(1 if xσ > 0 else 0)
-        others = {}
-        for src in newσ.sens:
-            others[src] = float(len([σ for σ in σs if σ.sens.get(src, 0) > 0]))
-        s = own + SensEnv(others)
+        s = own + newσ.scale(float('inf'))
     else:
         # Value-distance results: each changed row (or unit of value
         # distance) moves its result by at most xσ; other sources compose

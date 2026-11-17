@@ -12,6 +12,12 @@ import random
 import functools
 from collections.abc import Iterable
 
+def _released(value, kwargs, mechanism, scale, sensitivity, bounds):
+    """The mechanism's return value: `value`, or a Release with `details=True`."""
+    if kwargs.get('details', False):
+        return Release(value, mechanism, float(scale), float(sensitivity), tuple(bounds))
+    return value
+
 class DDAccountant():
     def __init__(self, ods = [], fs = [], advods = [], advfs = [] ):
         """
@@ -431,7 +437,8 @@ def gauss(val,**kwargs):
         kwargs['δ']: privacy parameter
 
     Returns:
-        float: val with added Guassian noise
+        float: val with added Guassian noise; with details=True, a Release
+        recording the noise scale and public bounds of the true value
     """
     if 'ε' in kwargs:
         eps = kwargs['ε']
@@ -464,7 +471,7 @@ def gauss(val,**kwargs):
         for o in accountant.advods:
             o.add(val.senv.shrug(eps,dlta))
 
-        return val.val + noise
+        return _released(val.val + noise, kwargs, 'gaussian', sigma, sensitivity, val.bounds)
     else:
         raise ValueError(f'Gauss: Unable to analyze value {val} of type {t}')
 
@@ -479,7 +486,8 @@ def renyi_gauss(val,**kwargs):
         kwargs['ε']: privacy parameter
 
     Returns:
-        float: val with added Guassian noise
+        float: val with added Guassian noise; with details=True, a Release
+        recording the noise scale and public bounds of the true value
     """
 
     if 'ε' in kwargs:
@@ -507,9 +515,10 @@ def renyi_gauss(val,**kwargs):
         for o in accountant.ods:
             o.add(val.senv.renyi_shrug(al, eps))
 
-        return val.val + noise
+        return _released(val.val + noise, kwargs, 'gaussian', sigma, sensitivity, val.bounds)
     else:
-        return val
+        # an untracked value is returned as is: exact, with no noise
+        return _released(val, kwargs, 'gaussian', 0.0, 0.0, get_bounds(val))
 
 def renyi_gauss_vec(val,**kwargs):
     """
@@ -522,7 +531,8 @@ def renyi_gauss_vec(val,**kwargs):
         kwargs['ε']: privacy parameter
 
     Returns:
-        list: val with added Laplacian noise
+        list: val with added Laplacian noise; with details=True, a Release
+        recording the noise scale and public bounds of the true value
     """
 
     if 'ε' in kwargs:
@@ -551,7 +561,7 @@ def renyi_gauss_vec(val,**kwargs):
         for o in accountant.ods:
             o.add(val.senv.renyi_shrug(al, eps))
 
-        return valp + noise
+        return _released(valp + noise, kwargs, 'gaussian', sigma, sensitivity, val.bounds)
     else:
         raise ValueError(f'RenyiGauss: Unable to analyze value {val} of type {t}')
 
@@ -566,7 +576,8 @@ def laplace(val, **kwargs):
         kwargs['ε']: privacy parameter
 
     Returns:
-        float: val with added Laplacian noise
+        float: val with added Laplacian noise; with details=True, a Release
+        recording the noise scale and public bounds of the true value
     """
 
     if 'ε' in kwargs:
@@ -598,9 +609,10 @@ def laplace(val, **kwargs):
     # check if value is a list for parallel composition
     if hasattr(val.val, '__len__'):
         size = len(val.val)
-        return val.val + np.random.laplace(loc=0, scale=scale, size=size)
-
-    return val.val + noise
+        released = val.val + np.random.laplace(loc=0, scale=scale, size=size)
+    else:
+        released = val.val + noise
+    return _released(released, kwargs, 'laplace', scale, sensitivity, val.bounds)
 
 def report_noisy_max(val, R, u, epsilon):
     """

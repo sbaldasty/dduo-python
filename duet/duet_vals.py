@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 from functools import partial
 from .duet_core import *
 from .duet_envs import *
@@ -240,6 +241,22 @@ def release_sensitivity(val):
     if isinstance(val.mode, Rows):
         return rows_to_value(val.senv, val.bounds, _elements_per_row(val.val)).get_max()
     return val.senv.get_max()
+
+@dataclass(frozen=True)
+class Release:
+    """What a mechanism released, with the public facts needed to interpret
+    it (e.g. as a posterior over the true value). Mechanisms return one
+    when called with `details=True`.
+
+    Every field is safe to publish: `scale` and `sensitivity` follow from
+    the program, the privacy parameters and public bounds, and `bounds`
+    holds for every possible dataset.
+    """
+    value: object        # the released number or array, as returned by default
+    mechanism: str       # 'gaussian' or 'laplace'
+    scale: float         # noise standard deviation (gaussian) or Laplace scale b
+    sensitivity: float   # the value distance the noise was calibrated to
+    bounds: tuple        # public (lo, hi) for each element of the *true* value
 
 # ── Elementwise binary operations ─────────────────────────────────────────
 

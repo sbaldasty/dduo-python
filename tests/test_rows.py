@@ -106,14 +106,15 @@ def test_map_over_rows_ignoring_the_element_has_no_own_sensitivity():
     assert {str(k): v for k, v in result.senv.sens.items()}["DataSource(ls)"] == 0
 
 
-def test_map_over_rows_counts_elements_reading_another_source():
-    # a change to `other` changes all three elements: three rows, whatever
-    # other's own (value) sensitivity is
+def test_map_over_rows_reading_another_source_is_unbounded_in_it():
+    # a change to `other` changes every element, and the number of elements
+    # is private: counting them would leak it through the noise scale
     other = duet.DuetWrapper(2.0, duet.SensEnv({duet.DataSource("other"): 0.5}), LInf())
     result = duet.map(lambda x: x + other, rows([1.0, 2.0, 3.0]))
     assert result.mode == Rows()
-    assert {str(k): v for k, v in result.senv.sens.items()} == {
-        "DataSource(ls)": 1.0, "DataSource(other)": 3.0}
+    sens = {str(k): v for k, v in result.senv.sens.items()}
+    assert sens["DataSource(ls)"] == 1.0
+    assert math.isinf(sens["DataSource(other)"])
 
 
 def test_map_clipping_each_row_gives_count_times_bound():
