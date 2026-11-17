@@ -1,14 +1,11 @@
 from .duet_core import *
 from .duet_envs import *
+from .duet_vals import _sensitive
 import pandas as pd
 import numpy as np
 import builtins
 import math
 
-
-def _sensitive(x):
-    """Whether `x` depends on any tracked data source."""
-    return isinstance(x, DuetWrapper) and builtins.any(v != 0 for v in x.senv.sens.values())
 
 def _unbounded(x):
     return get_senv(x).scale(float('inf'))

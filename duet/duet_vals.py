@@ -53,6 +53,10 @@ class DataSource:
         return hash(self.desc)
 
 # Utilities for the Duet Wrapper
+def _sensitive(obj):
+    """Whether `obj` depends on any tracked data source."""
+    return isinstance(obj, DuetWrapper) and any(v != 0 for v in obj.senv.sens.values())
+
 def unwrap(obj):
     if isinstance(obj, DuetWrapper):
         return unwrap(obj.val)
@@ -107,32 +111,40 @@ def floor_div_by_constant(senv, mode, c):
     return senv.scale(float('inf'))
 
 # These are the sensitivity "transformers" used in the lookup table below
-def sens_id(senv, mode, args):
+def sens_id(senv, mode, args, kwargs=None):
     return senv, mode
 
-def sens_inf(senv, mode, args):
+def sens_inf(senv, mode, args, kwargs=None):
     #print(f'called inf {senv}')
     return senv.scale(float('inf')), mode
 
 
-def sens_clip(senv, mode, args):
-    lower, upper = args
+def sens_clip(senv, mode, args, kwargs=None):
+    # pandas' Series.clip(lower=None, upper=None, ...): positional or keyword
+    kwargs = kwargs or {}
+    lower = args[0] if len(args) > 0 else kwargs.get('lower')
+    upper = args[1] if len(args) > 1 else kwargs.get('upper')
+    if lower is None or upper is None or _sensitive(lower) or _sensitive(upper):
+        # A one-sided clip bounds nothing on the open side, and bounds that
+        # depend on the data are not public: either way no sensitivity bound.
+        return senv.scale(float('inf')), mode
     if mode == LInf():
         # One changed row moves one element arbitrarily far; after clipping
-        # it moves at most upper - lower.
-        return senv.scale(upper - lower), L1()
+        # it moves at most upper - lower (the widest gap, for array bounds).
+        width = np.max(np.asarray(unwrap(upper), dtype=float) - np.asarray(unwrap(lower), dtype=float))
+        return senv.scale(width), L1()
     # Clipping is 1-Lipschitz in every coordinate, so it never increases an
     # L1 or L2 distance that is already bounded.
     return senv, mode
 
-def sens_sum(senv, mode, args):
+def sens_sum(senv, mode, args, kwargs=None):
     if mode == L1():
         return senv, mode
     # Summing elements that are not bounded in L1 (e.g. an unclipped column)
     # has unbounded sensitivity: clip before summing.
     return senv.scale(float('inf')), mode
 
-def sens_getitem(senv, mode, args):
+def sens_getitem(senv, mode, args, kwargs=None):
     # TODO: this should probably use the args in some cases
     return senv, mode
 
@@ -215,14 +227,18 @@ class DuetWrapper:
 
         if callable(attr):
             def _missing(*args, **kwargs):
+                # Every DuetWrapper argument, positional or keyword, feeds
+                # its sensitivity into the result; the method itself gets
+                # the plain values, as __getitem__ does with its key.
                 new_senv = self.senv
-                for a in args:
+                for a in [*args, *kwargs.values()]:
                     if isinstance(a, DuetWrapper):
                         new_senv = new_senv + a.senv
 
-                result = attr(*args, **kwargs)
+                result = attr(*[unwrap(a) for a in args],
+                              **{k: unwrap(v) for k, v in kwargs.items()})
 
-                new_senv, new_mode = sens_mod(new_senv, self.mode, args)
+                new_senv, new_mode = sens_mod(new_senv, self.mode, args, kwargs)
 
                 return DuetWrapper(result, new_senv, new_mode)
             return _missing
