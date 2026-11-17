@@ -86,8 +86,15 @@ def list(l):
             sns = {set(fldss).pop(): mode.bound}
         sens = sns
     else:
+        # The elements disagree on metric or data source, so the list's
+        # sensitivity cannot be stated in any one metric: treat every source
+        # it depends on as unbounded. (Returning {} here claimed the list
+        # depends on no data at all.)
         mode = LInf()
-        sens = {}
+        sources = set(fldss)
+        if hasattr(l, 'senv'):
+            sources |= set(l.senv.sens)
+        sens = {src: float('inf') for src in sources}
     r = DuetWrapper(old_list(l1),SensEnv(sens),mode)
     return r
 
@@ -144,44 +151,44 @@ def map(f,l):
 
     """
     sx  = DataSource(random_generator())
-    σ   = SensEnv({sx : 1.0})
     vss = []
     xσs = []
     σs = []
     newσ = SensEnv()
     modes = []
-    dssources = []
     for a in unwrap(l):
-        x = f(DuetWrapper(a,σ,LInf()))
+        # A fresh environment per element, and no in-place edits below: an
+        # `f` that returns its argument (or any value sharing its
+        # environment) used to have `sx` popped from the one environment all
+        # elements shared, so every later element was tracked as
+        # 0-sensitive in `sx`.
+        x = f(DuetWrapper(a,SensEnv({sx : 1.0}),LInf()))
         # get the sens for "x" from each result
         s = x.senv.sens.get(sx,0)
         xσs.append(s)
-        x.senv.sens.pop(sx,0)
         # get the "non-x" sens for each result
-        σs.append(x.senv)
+        rest = SensEnv({k: v for k, v in x.senv.sens.items() if k != sx})
+        σs.append(rest)
         modes.append(x.mode)
-        dssources.append(x.senv.sens.keys())
         vss.append(unwrap(x))
         # parallel composition for "x"
-        newσ += x.senv
+        newσ += rest
     xσ  = max(xσs)
     xσp = l.senv.scale(xσ)
     # sequential composition for everything else
     s  = newσ + xσp
-    f = DuetWrapper(vss, s ,LInf())
-    fldss = old_list(itertools.chain(*old_list(dssources)))
-    s = set(old_list(modes))
-    if len(s) == 1 and len(set(fldss)) == 1:
-        mode = s.pop()
-        if hasattr(f, 'senv'):
-            sns = f.senv.sens
-        else:
-            sns = {set(fldss).pop(): mode.bound}
-        sens = sns
+    # `s` is the sensitivity of the result whatever sources `f` touches.
+    # (This used to be discarded -- leaving sensitivity {} -- unless `f`
+    # touched exactly one source besides the element, so even
+    # map(lambda x: x + 1, ls) came out as depending on no data.)
+    result_modes = set(old_list(modes))
+    if len(result_modes) == 1:
+        mode = result_modes.pop()
+        sens = s.sens
     else:
+        # Results in different metrics: no single metric bounds the list.
         mode = LInf()
-        sens = {}
-    # return r # return the result list with the new σ
+        sens = {src: float('inf') for src in s.sens}
     r = DuetWrapper(vss,SensEnv(sens),mode)
     return r
 
