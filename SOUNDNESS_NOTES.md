@@ -129,18 +129,20 @@ error vector built with `duet.list2`, not rows of data.
 
 ## noisyvalue follow-ups (`~/code/github/sbaldasty/noisyvalue`)
 
-- `noisyvalue.dduo` (commit `affc384`) duplicates DDuo's calibration and
-  accounting and reads `val.senv.get_max()` directly. Once the PR lands, rewrite
-  each wrapper as a DDuo mechanism called with `details=True`, passed to
-  `observe_release(r.value, mechanism=r.mechanism, scale=r.scale,
-  low=r.bounds[0], high=r.bounds[1])`. That gives truncation at 0 for counts and
-  for sums of non-negative values automatically, and drops the copied
-  accounting.
-- `noisyvalue/private.py`: per-unit sensitivity there is computed from the units
-  present (data-dependent, so it leaks through the noise scale), and its
-  truncation bound `sum(t.hi)` reveals `n`. The idea worth keeping, range
-  tracking, now lives in DDuo as `bounds`. Agreed it can be deleted (only
-  `test/test_private.py` depends on it).
+Done on noisyvalue `main` (local, not pushed), 2026-11-17: `c8797d0`
+(cherry-pick of the `affc384` adapter from `evocomp`) and `b49076d`.
+
+- `noisyvalue.dduo` now calls each `duet` mechanism with `details=True` and
+  builds the posterior from the `Release` (truncated by `bounds`; the
+  caller's `low`/`high` only narrow them). Untracked values and infinite/zero
+  `release_sensitivity` are refused before DDuo is called, so a refusal
+  spends no budget. Its tests need this branch on `PYTHONPATH` until the PR
+  lands.
+- `noisyvalue/private.py` and `test/test_private.py` are deleted.
+- **Open:** the adapter's `rng=` (a NumPy `Generator`) was dropped, since DDuo
+  draws from global `np.random`. Bringing it back needs DDuo's mechanisms to
+  accept a generator, e.g. an `rng=` keyword passed through to `_noise`.
+  Candidate for this PR or a follow-up.
 
 ## Checking a change
 
